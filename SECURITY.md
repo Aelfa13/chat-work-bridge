@@ -16,6 +16,8 @@ Engineering Bridge 0.1.0-alpha connects an MCP client to a local Codex CLI. Trea
 
 The bridge does not authenticate MCP callers. It has no HTTP or remote transport, persistent storage, persistent logging/redaction system, cancellation, or timeout. It does not verify that configured paths are Git repositories, resolve them with `realpath`, or enforce symlink containment. A trusted local operator must therefore control the configuration file, choose workspace roots carefully, and control which local MCP client can start and use the server.
 
+Codex's read-only sandbox prevents writes, but Engineering Bridge does not provide filesystem read isolation. Codex running as the same operating-system user may still read files outside the configured workspace that the user already has permission to read, so use it only on trusted machines and with trusted local clients.
+
 The read-only sandbox is an execution control, not a guarantee that prompts or returned text contain no sensitive data. Do not place credentials or secrets in instructions, configuration, or public bug reports.
 
 ## Reporting a vulnerability
