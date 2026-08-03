@@ -1,17 +1,23 @@
 # Security Policy
 
-Engineering Bridge is security-sensitive because it connects an MCP client to a local executor.
+Engineering Bridge 0.1.0-alpha connects an MCP client to a local Codex CLI. Treat both the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service.
 
-The project is not yet released. Do not deploy this repository or expose it beyond loopback.
+## Current enforced controls
 
-After publication, security reports should use the repository's private vulnerability-reporting channel. Do not include credentials, private prompts, source code, or personal data in a public issue.
+- The server uses local STDIO and exposes exactly `run_task`, `task_status`, and `task_result`.
+- Workspace IDs and roots come from a startup configuration file. Roots must be absolute and normalized, duplicate IDs are rejected, and MCP callers cannot add or replace registrations.
+- Codex is launched with fixed arguments: approval `never`, a read-only sandbox, an ephemeral session, network disabled, and the configured workspace as its working directory.
+- Instructions are written to Codex through standard input. The bridge does not invoke a shell or accept caller-supplied executable paths or process arguments.
+- The Codex child receives a small allowlist of inherited environment fields.
+- Returned execution failures use fixed error codes and messages rather than forwarding Codex stderr or raw internal errors.
+- Tasks and results are held only in process memory.
 
-## Non-negotiable boundaries for v0.1
+## Current limitations
 
-- No arbitrary shell or caller-supplied argv.
-- No caller-controlled workspace registration.
-- No write access to target workspaces.
-- Canonical path and symlink-escape validation.
-- Minimal child-process environment.
-- Redaction before persistent logging.
-- Loopback-only service exposure.
+The bridge does not authenticate MCP callers. It has no HTTP or remote transport, persistent storage, persistent logging/redaction system, cancellation, or timeout. It does not verify that configured paths are Git repositories, resolve them with `realpath`, or enforce symlink containment. A trusted local operator must therefore control the configuration file, choose workspace roots carefully, and control which local MCP client can start and use the server.
+
+The read-only sandbox is an execution control, not a guarantee that prompts or returned text contain no sensitive data. Do not place credentials or secrets in instructions, configuration, or public bug reports.
+
+## Reporting a vulnerability
+
+Do not publish secrets, credentials, private prompts, source code, or personal data in an issue. After the repository is hosted and its security-advisory feature is available, use that feature for private vulnerability reports. Until then, omit sensitive details from public reports.

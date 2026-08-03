@@ -1,34 +1,57 @@
 # Engineering Bridge
 
-> Repository skeleton only. No private prototype code has been migrated, and this repository is not ready for use or publication.
+Engineering Bridge 0.1.0-alpha is a small local STDIO MCP server. It sends an instruction to the locally installed Codex CLI in a configured workspace and returns Codex's final text to the MCP client.
 
-Engineering Bridge is planned as a small, local-first bridge that lets an MCP client submit a **read-only** task to Codex inside a pre-registered local Git workspace, then retrieve task status and results.
+This is alpha software. Run it only on a machine you control, and have a trusted local operator maintain the workspace configuration.
 
 [简体中文](README.zh-CN.md)
 
-## v0.1 scope
+## Requirements
 
-- Codex is the only executor.
-- Registered Git workspaces only.
-- Target workspaces are read-only.
-- The service binds to loopback only.
-- No arbitrary shell, argv, executable path, or remote permission escalation.
-- Task metadata is stored outside target workspaces.
-- Remote transport is out of scope and must be provided separately.
+- Node.js 22 or newer
+- The Codex CLI installed, available as `codex`, and authenticated
 
-## Explicitly out of scope
+## Install and check
 
-- Generic shell execution
-- Target-workspace writes
-- Multi-executor routing
-- Subagents
-- Quota-aware routing
-- Tray UI or dashboard
-- Accounts, teams, or cloud task management
-- Private transport, credential-store, or machine-specific integrations
+```sh
+npm install
+npm run typecheck
+npm run build
+npm test
+```
 
-## Repository status
+## Configure and start
 
-This skeleton intentionally contains no implementation. The package is marked `private` and `UNLICENSED` to prevent accidental publication before the security, dependency-license, and provenance reviews are complete.
+Copy the example configuration and edit it:
 
-See `docs/decisions/0001-v0.1-scope.md` for the frozen first-release boundary.
+```sh
+cp config/workspaces.example.json workspaces.json
+```
+
+Each entry maps a caller-visible ID to a workspace root. `root` must be an absolute, normalized path (for example, `/home/alice/projects/example`, not a relative path or a path containing `..`). The file is trusted local configuration; MCP callers cannot register workspace roots.
+
+After building, start the STDIO server with either command:
+
+```sh
+node dist/src/mcp-stdio.js /absolute/path/to/workspaces.json
+# or
+npm run mcp:stdio -- /absolute/path/to/workspaces.json
+```
+
+Connect that process to an MCP client as a local STDIO server. There is no HTTP or remote transport.
+
+## Tools and task flow
+
+The server exposes exactly three tools:
+
+1. `run_task` accepts `workspace_id` and `instruction`, queues the work, and returns a `task_id`.
+2. `task_status` accepts the `task_id`; poll it until the state is `completed` or `failed`.
+3. `task_result` accepts the `task_id` and returns the final Codex text or a safe error after the task reaches a terminal state.
+
+Tasks and results exist only in process memory and disappear when the server restarts.
+
+## Enforced execution boundary
+
+For every task, the bridge launches local Codex with a fixed read-only sandbox, approval set to `never`, an ephemeral session, and network access disabled. It does not invoke a shell, and the child process receives only a small allowlist of inherited environment fields. The instruction is sent on standard input rather than placed in caller-controlled arguments.
+
+The current implementation has no HTTP server, remote transport, database, persistence, UI, accounts, workspace writes, automatic commits, or pushes. It also does not verify that a configured root is a Git repository or resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.

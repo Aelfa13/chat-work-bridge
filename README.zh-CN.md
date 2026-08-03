@@ -1,28 +1,57 @@
 # Engineering Bridge
 
-> 当前仅为独立公共仓库骨架。尚未迁入私有原型代码，也未达到可使用或可发布状态。
+Engineering Bridge 0.1.0-alpha 是一个小型本地 STDIO MCP 服务器。它把指令发送给本机已安装的 Codex CLI，在配置的工作区中执行，并把 Codex 的最终文本返回给 MCP 客户端。
 
-Engineering Bridge 计划做成一个小型、本地优先的桥：让上层 MCP 客户端把**只读任务**交给预登记本地 Git 工作区中的 Codex，并取回任务状态与结果。
+这是 alpha 软件。请只在自己控制的机器上运行，并由可信的本地操作员维护工作区配置。
 
-## v0.1 范围
+[English](README.md)
 
-- 只支持 Codex 执行器；
-- 只支持预登记 Git 工作区；
-- 目标工作区只读；
-- 服务只绑定 loopback；
-- 不接受任意 Shell、argv、可执行文件路径或远程提权；
-- 桥的任务元数据保存在目标工作区之外；
-- 远程传输不属于核心仓库，由独立安全通道承担。
+## 环境要求
 
-## 明确不做
+- Node.js 22 或更高版本
+- 已安装 Codex CLI、可通过 `codex` 命令调用，且已完成认证
 
-- 通用 Shell；
-- 修改目标工作区；
-- 多执行器、子代理和额度路由；
-- 托盘界面或 Dashboard；
-- 账号、团队与云端任务中心；
-- 私有传输、凭据存储或特定机器集成。
+## 安装与检查
 
-## 当前状态
+```sh
+npm install
+npm run typecheck
+npm run build
+npm test
+```
 
-骨架中没有实现代码。`package.json` 暂时保留 `private: true` 和 `UNLICENSED`，用于防止在安全审查、依赖许可证审查和代码来源审查完成前误发布。
+## 配置与启动
+
+复制示例配置并编辑：
+
+```sh
+cp config/workspaces.example.json workspaces.json
+```
+
+每个条目把客户端可见的 ID 映射到一个工作区根目录。`root` 必须是绝对且规范化的路径（例如 `/home/alice/projects/example`，不能是相对路径，也不能包含 `..`）。该文件属于可信的本地配置；MCP 调用方不能注册工作区根目录。
+
+构建完成后，可用以下任一命令启动 STDIO 服务器：
+
+```sh
+node dist/src/mcp-stdio.js /absolute/path/to/workspaces.json
+# 或
+npm run mcp:stdio -- /absolute/path/to/workspaces.json
+```
+
+请让 MCP 客户端把该进程作为本地 STDIO 服务器连接。本项目没有 HTTP 或远程传输。
+
+## 工具与任务流程
+
+服务器只提供以下三个工具：
+
+1. `run_task` 接收 `workspace_id` 和 `instruction`，把任务加入队列并返回 `task_id`；
+2. `task_status` 接收 `task_id`，应轮询至状态变为 `completed` 或 `failed`；
+3. `task_result` 接收 `task_id`，在任务结束后返回 Codex 的最终文本或安全错误。
+
+任务和结果只保存在进程内存中；服务器重启后会全部消失。
+
+## 已实施的执行边界
+
+每个任务都会以固定参数启动本机 Codex：只读沙箱、审批策略 `never`、临时会话，并禁用网络访问。执行过程不调用 Shell，子进程只继承少量允许的环境字段。指令通过标准输入发送，而不是成为调用方可控的命令参数。
+
+当前实现没有 HTTP 服务器、远程传输、数据库、持久化、UI、账号、工作区写入、自动提交或推送。它也不会验证配置的根目录是否为 Git 仓库，也不会解析真实路径以实施符号链接包含关系检查。任务不支持取消或超时。使用前请阅读 [SECURITY.md](SECURITY.md)。
