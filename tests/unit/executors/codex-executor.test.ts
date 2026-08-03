@@ -7,27 +7,11 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { isId } from "../../../src/core/ids.js";
 import { CodexExecutor } from "../../../src/executors/codex-executor.js";
 import type { ProcessStarter } from "../../../src/executors/codex-executor.js";
-import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
-import type { TrustedWorkspace } from "../../../src/workspaces/registered-workspace-registry.js";
 
 const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
 if (!isId(TASK_ID_VALUE)) throw new Error("Test task ID must be a UUID v4.");
 const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
-
-async function trustedWorkspace(): Promise<TrustedWorkspace> {
-  const git = async (_root: string, args: readonly string[]): Promise<string> => {
-    if (args.includes("--show-toplevel")) return `${TRUSTED_CWD}\n`;
-    if (args.includes("--is-inside-work-tree")) return "true\n";
-    if (args[0] === "symbolic-ref") return "main\n";
-    return "";
-  };
-  return new RegisteredWorkspaceRegistry(
-    [{ id: "test", root: TRUSTED_CWD, allowedBranches: ["main"], requireClean: true }],
-    git,
-    { lstat: async () => ({ isSymbolicLink: () => false }), realpath: async (path) => path }
-  ).resolve("test");
-}
 
 interface Invocation {
   executable: string;
@@ -87,7 +71,7 @@ test("uses the fixed safe invocation and returns agent text", async () => {
     SSH_AUTH_SOCK: "secret-ssh",
     EMPTY_ALLOWED: ""
   };
-  const executor = new CodexExecutor(await trustedWorkspace(), fakeStarter({
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({
     stdout: [
       JSON.stringify({ type: "thread.started", thread_id: "ignored" }),
       JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "final answer" } })
@@ -121,9 +105,8 @@ test("uses the fixed safe invocation and returns agent text", async () => {
 
 test("maps a thrown spawn and a process error to unavailable", async () => {
   const throwing: ProcessStarter = () => { throw new Error("secret spawn details"); };
-  const workspace = await trustedWorkspace();
-  const thrown = await new CodexExecutor(workspace, throwing, {}).execute({ taskId: TASK_ID, instruction: "x" });
-  const emitted = await new CodexExecutor(workspace, fakeStarter({ processError: true }, []), {})
+  const thrown = await new CodexExecutor(TRUSTED_CWD, throwing, {}).execute({ taskId: TASK_ID, instruction: "x" });
+  const emitted = await new CodexExecutor(TRUSTED_CWD, fakeStarter({ processError: true }, []), {})
     .execute({ taskId: TASK_ID, instruction: "x" });
 
   for (const result of [thrown, emitted]) {
@@ -141,7 +124,7 @@ test("rejects malformed JSONL, missing messages, and malformed message structure
     JSON.stringify({ type: "item.completed", item: { type: "agent_message" } })
   ];
   for (const stdout of outputs) {
-    const result = await new CodexExecutor(await trustedWorkspace(), fakeStarter({ stdout }, []), {})
+    const result = await new CodexExecutor(TRUSTED_CWD, fakeStarter({ stdout }, []), {})
       .execute({ taskId: TASK_ID, instruction: "x" });
     assert.deepEqual(result, {
       kind: "failed",
@@ -152,7 +135,7 @@ test("rejects malformed JSONL, missing messages, and malformed message structure
 });
 
 test("nonzero exit discards partial output and stderr details", async () => {
-  const result = await new CodexExecutor(await trustedWorkspace(), fakeStarter({
+  const result = await new CodexExecutor(TRUSTED_CWD, fakeStarter({
     stdout: JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "secret partial" } }),
     stderr: "secret stderr /private/path",
     exitCode: 7
@@ -166,13 +149,4 @@ test("nonzero exit discards partial output and stderr details", async () => {
   assert.equal(serialized.includes("secret partial"), false);
   assert.equal(serialized.includes("secret stderr"), false);
   assert.equal(serialized.includes("/private/path"), false);
-});
-
-test("rejects a forged TrustedWorkspace capability without exposing its path", () => {
-  const marker = "/secret/forged/path";
-  const forged = { id: "test", canonicalRoot: marker } as unknown as TrustedWorkspace;
-  assert.throws(() => new CodexExecutor(forged, fakeStarter({}, []), {}), (error: unknown) => {
-    assert.equal(JSON.stringify(error).includes(marker), false);
-    return error instanceof Error && error.message === "The workspace boundary could not be verified.";
-  });
 });

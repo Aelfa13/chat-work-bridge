@@ -1,18 +1,28 @@
 import { newId } from "../core/ids.js";
 import { serializeError } from "../core/errors.js";
 import type { Id } from "../core/ids.js";
+import type { SerializedError } from "../core/errors.js";
 import type { Executor } from "../executors/executor.js";
-import type { TrustedWorkspace } from "../workspaces/registered-workspace-registry.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
-import { TaskOrchestrator } from "./task-orchestrator.js";
-import type { TaskSnapshot } from "./task-orchestrator.js";
 
 export interface RegisteredWorkspaceTaskRequest {
   readonly workspace_id: string;
   readonly instruction: string;
 }
 
-export type ExecutorFactory = (workspace: TrustedWorkspace) => Executor;
+export type RegisteredWorkspaceTaskResult =
+  | {
+    readonly id: Id;
+    readonly state: "completed";
+    readonly output: string;
+  }
+  | {
+    readonly id: Id;
+    readonly state: "failed";
+    readonly error: SerializedError;
+  };
+
+export type ExecutorFactory = (workspaceRoot: string) => Executor;
 
 export class RegisteredWorkspaceTaskService {
   constructor(
@@ -20,11 +30,15 @@ export class RegisteredWorkspaceTaskService {
     private readonly executorFactory: ExecutorFactory
   ) {}
 
-  async execute(request: RegisteredWorkspaceTaskRequest): Promise<TaskSnapshot> {
+  async execute(request: RegisteredWorkspaceTaskRequest): Promise<RegisteredWorkspaceTaskResult> {
     const id: Id = newId();
     try {
-      const workspace = await this.registry.resolve(request.workspace_id);
-      return await new TaskOrchestrator(this.executorFactory(workspace), id).execute(request.instruction);
+      const workspaceRoot = this.registry.resolve(request.workspace_id);
+      const executor = this.executorFactory(workspaceRoot);
+      const result = await executor.execute({ taskId: id, instruction: request.instruction });
+      return result.kind === "completed"
+        ? { id, state: "completed", output: result.output }
+        : { id, state: "failed", error: result.error };
     } catch (error) {
       return { id, state: "failed", error: serializeError(error) };
     }

@@ -1,9 +1,6 @@
-{
-  "workspaces": [
-    {
-      "id": "example-readonly-repository",
-      "path": "/absolute/path/to/a/test-git-repository",
-      "mode": "read_only"
-    }
-  ]
-}
+[
+  {
+    "id": "example-project",
+    "root": "/absolute/path/to/project"
+  }
+]

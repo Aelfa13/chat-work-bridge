@@ -3,8 +3,6 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 
 import { CoreError, serializeError } from "../core/errors.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "./executor.js";
-import { trustedWorkspaceRoot } from "../workspaces/registered-workspace-registry.js";
-import type { TrustedWorkspace } from "../workspaces/registered-workspace-registry.js";
 
 export type ProcessStarter = (
   executable: string,
@@ -73,14 +71,10 @@ function parseOutput(stdout: string): ExecutorResult {
 
 export class CodexExecutor implements Executor {
   constructor(
-    workspace: TrustedWorkspace,
+    private readonly workspaceRoot: string,
     private readonly startProcess: ProcessStarter = spawn,
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env
-  ) {
-    this.trustedCwd = trustedWorkspaceRoot(workspace);
-  }
-
-  private readonly trustedCwd: string;
+  ) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     const args = [
@@ -89,7 +83,7 @@ export class CodexExecutor implements Executor {
       "--sandbox", "read-only",
       "--ephemeral",
       "--json",
-      "--cd", this.trustedCwd,
+      "--cd", this.workspaceRoot,
       "--ignore-user-config",
       "--strict-config",
       "-c", "sandbox_workspace_write.network_access=false",
@@ -99,7 +93,7 @@ export class CodexExecutor implements Executor {
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.startProcess("codex", args, {
-        cwd: this.trustedCwd,
+        cwd: this.workspaceRoot,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
         env: minimalEnvironment(this.hostEnvironment)

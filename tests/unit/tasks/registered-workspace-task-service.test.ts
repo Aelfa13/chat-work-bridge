@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { SerializedError } from "../../../src/core/errors.js";
 import type { Executor, ExecutorRequest } from "../../../src/executors/executor.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
 import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
@@ -8,52 +9,77 @@ import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-
 const ROOT = "/registered/root";
 
 function registry(): RegisteredWorkspaceRegistry {
-  return new RegisteredWorkspaceRegistry(
-    [{ id: "known", root: ROOT, allowedBranches: ["main"], requireClean: true }],
-    async (_root, args) => {
-      if (args.includes("--show-toplevel")) return `${ROOT}\n`;
-      if (args.includes("--is-inside-work-tree")) return "true\n";
-      if (args[0] === "symbolic-ref") return "main\n";
-      return "";
-    },
-    { lstat: async () => ({ isSymbolicLink: () => false }), realpath: async (path) => path }
-  );
+  return new RegisteredWorkspaceRegistry([{ id: "known", root: ROOT }]);
 }
 
-test("uses one generated id and preserves instruction and output", async () => {
-  const calls: ExecutorRequest[] = [];
+test("does not create an executor for an unknown workspace", async () => {
   let factories = 0;
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    factories += 1;
+    throw new Error("must not run");
+  });
+
+  const result = await service.execute({ workspace_id: "unknown", instruction: "inspect" });
+
+  assert.equal(factories, 0);
+  assert.equal(result.state, "failed");
+  if (result.state === "failed") {
+    assert.deepEqual(result.error, {
+      code: "UNKNOWN_WORKSPACE",
+      message: "The requested workspace is not registered.",
+      retryable: false
+    });
+  }
+});
+
+test("preserves the instruction and uses the result task id", async () => {
+  const calls: ExecutorRequest[] = [];
+  const roots: string[] = [];
   const executor: Executor = {
     execute: async (request) => {
       calls.push(request);
-      return { kind: "completed", output: "exact output" };
+      return { kind: "completed", output: "done" };
     }
   };
-  const service = new RegisteredWorkspaceTaskService(registry(), () => { factories += 1; return executor; });
+  const service = new RegisteredWorkspaceTaskService(registry(), (root) => {
+    roots.push(root);
+    return executor;
+  });
   const instruction = "  exact instruction\nwith bytes $()  ";
-  const snapshot = await service.execute({ workspace_id: "known", instruction });
 
-  assert.equal(snapshot.state, "completed");
-  assert.equal(factories, 1);
-  assert.deepEqual(calls, [{ taskId: snapshot.id, instruction }]);
-  if (snapshot.state === "completed") assert.equal(snapshot.output, "exact output");
+  const result = await service.execute({ workspace_id: "known", instruction });
+
+  assert.equal(calls.length, 1);
+  assert.deepEqual(roots, [ROOT]);
+  assert.deepEqual(calls, [{ taskId: result.id, instruction }]);
 });
 
-test("boundary failure keeps the generated id, does not construct executor, and is redacted", async () => {
-  let factories = 0;
-  const secret = "/secret/unregistered/path";
-  const service = new RegisteredWorkspaceTaskService(registry(), () => {
-    factories += 1;
-    throw new Error(secret);
-  });
-  const snapshot = await service.execute({ workspace_id: secret, instruction: "x" });
+test("passes through completed output", async () => {
+  const output = "exact output";
+  const executor: Executor = {
+    execute: async () => ({ kind: "completed", output })
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
 
-  assert.equal(factories, 0);
-  assert.equal(snapshot.state, "failed");
-  assert.equal(JSON.stringify(snapshot).includes(secret), false);
-  if (snapshot.state === "failed") {
-    assert.deepEqual(snapshot.error, {
-      code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered.", retryable: false
-    });
-  }
+  const result = await service.execute({ workspace_id: "known", instruction: "inspect" });
+
+  assert.equal(result.state, "completed");
+  if (result.state === "completed") assert.equal(result.output, output);
+});
+
+test("passes through failed error", async () => {
+  const error: SerializedError = {
+    code: "CODEX_EXECUTION_FAILED",
+    message: "Codex execution failed.",
+    retryable: false
+  };
+  const executor: Executor = {
+    execute: async () => ({ kind: "failed", error })
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+
+  const result = await service.execute({ workspace_id: "known", instruction: "inspect" });
+
+  assert.equal(result.state, "failed");
+  if (result.state === "failed") assert.equal(result.error, error);
 });
