@@ -3,6 +3,8 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 
 import { CoreError, serializeError } from "../core/errors.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "./executor.js";
+import { trustedWorkspaceRoot } from "../workspaces/registered-workspace-registry.js";
+import type { TrustedWorkspace } from "../workspaces/registered-workspace-registry.js";
 
 export type ProcessStarter = (
   executable: string,
@@ -71,10 +73,14 @@ function parseOutput(stdout: string): ExecutorResult {
 
 export class CodexExecutor implements Executor {
   constructor(
-    private readonly trustedCwd: string,
+    workspace: TrustedWorkspace,
     private readonly startProcess: ProcessStarter = spawn,
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env
-  ) {}
+  ) {
+    this.trustedCwd = trustedWorkspaceRoot(workspace);
+  }
+
+  private readonly trustedCwd: string;
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     const args = [

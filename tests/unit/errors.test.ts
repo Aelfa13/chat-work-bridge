@@ -7,6 +7,9 @@ test("exposes the Codex error codes", () => {
   assert.deepEqual(ERROR_CODES, [
     "INTERNAL_ERROR",
     "INVALID_STATE_TRANSITION",
+    "UNKNOWN_WORKSPACE",
+    "WORKSPACE_BOUNDARY_VIOLATION",
+    "WORKSPACE_PRECONDITION_FAILED",
     "CODEX_UNAVAILABLE",
     "CODEX_PROTOCOL_ERROR",
     "CODEX_EXECUTION_FAILED"
@@ -19,6 +22,15 @@ test("exposes the Codex error codes", () => {
   });
   assert.deepEqual(serializeError(new CoreError("CODEX_EXECUTION_FAILED")), {
     code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed.", retryable: false
+  });
+  assert.deepEqual(serializeError(new CoreError("UNKNOWN_WORKSPACE")), {
+    code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered.", retryable: false
+  });
+  assert.deepEqual(serializeError(new CoreError("WORKSPACE_BOUNDARY_VIOLATION")), {
+    code: "WORKSPACE_BOUNDARY_VIOLATION", message: "The workspace boundary could not be verified.", retryable: false
+  });
+  assert.deepEqual(serializeError(new CoreError("WORKSPACE_PRECONDITION_FAILED")), {
+    code: "WORKSPACE_PRECONDITION_FAILED", message: "The workspace preconditions were not met.", retryable: false
   });
 });
 

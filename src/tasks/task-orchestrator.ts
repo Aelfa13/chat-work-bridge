@@ -19,10 +19,10 @@ export type TaskSnapshot =
   };
 
 export class TaskOrchestrator {
-  constructor(private readonly executor: Executor) {}
+  constructor(private readonly executor: Executor, private readonly suppliedId?: Id) {}
 
   async execute(instruction: string): Promise<TaskSnapshot> {
-    const taskId = newId();
+    const taskId = this.suppliedId ?? newId();
     let state: TaskState = "created";
 
     assertTransition(state, "inspecting");

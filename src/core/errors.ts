@@ -1,6 +1,9 @@
 export const ERROR_CODES = [
   "INTERNAL_ERROR",
   "INVALID_STATE_TRANSITION",
+  "UNKNOWN_WORKSPACE",
+  "WORKSPACE_BOUNDARY_VIOLATION",
+  "WORKSPACE_PRECONDITION_FAILED",
   "CODEX_UNAVAILABLE",
   "CODEX_PROTOCOL_ERROR",
   "CODEX_EXECUTION_FAILED"
@@ -26,6 +29,18 @@ const ERROR_DEFINITIONS: Readonly<Record<ErrorCode, ErrorDefinition>> = {
   },
   INVALID_STATE_TRANSITION: {
     message: "The requested state transition is not allowed.",
+    retryable: false
+  },
+  UNKNOWN_WORKSPACE: {
+    message: "The requested workspace is not registered.",
+    retryable: false
+  },
+  WORKSPACE_BOUNDARY_VIOLATION: {
+    message: "The workspace boundary could not be verified.",
+    retryable: false
+  },
+  WORKSPACE_PRECONDITION_FAILED: {
+    message: "The workspace preconditions were not met.",
     retryable: false
   },
   CODEX_UNAVAILABLE: {
