@@ -4,10 +4,13 @@
   "private": true,
   "description": "A local-first, read-only bridge from an MCP client to a registered Codex workspace.",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.json",
-    "test": "node --test"
+    "build": "tsc",
+    "test": "npm run build && node --test \"dist/tests/unit/**/*.test.js\""
   },
   "keywords": [
     "mcp",
@@ -15,5 +18,9 @@
     "local-first",
     "read-only"
   ],
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "typescript": "5.8.3"
+  }
 }
