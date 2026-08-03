@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { SerializedError } from "../../../src/core/errors.js";
-import type { Executor, ExecutorRequest } from "../../../src/executors/executor.js";
+import type { Executor, ExecutorRequest, ExecutorResult } from "../../../src/executors/executor.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
 import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
 
@@ -12,74 +12,115 @@ function registry(): RegisteredWorkspaceRegistry {
   return new RegisteredWorkspaceRegistry([{ id: "known", root: ROOT }]);
 }
 
-test("does not create an executor for an unknown workspace", async () => {
-  let factories = 0;
-  const service = new RegisteredWorkspaceTaskService(registry(), () => {
-    factories += 1;
-    throw new Error("must not run");
-  });
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => { resolve = done; });
+  return { promise, resolve };
+}
 
-  const result = await service.execute({ workspace_id: "unknown", instruction: "inspect" });
-
-  assert.equal(factories, 0);
-  assert.equal(result.state, "failed");
-  if (result.state === "failed") {
-    assert.deepEqual(result.error, {
-      code: "UNKNOWN_WORKSPACE",
-      message: "The requested workspace is not registered.",
-      retryable: false
-    });
+async function waitForTerminal(service: RegisteredWorkspaceTaskService, taskId: string): Promise<void> {
+  while (service.status(taskId)?.state === "queued" || service.status(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
   }
-});
+}
 
-test("preserves the instruction and uses the result task id", async () => {
+test("returns immediately and exposes queued/running without a result", async () => {
+  const pending = deferred<ExecutorResult>();
   const calls: ExecutorRequest[] = [];
-  const roots: string[] = [];
-  const executor: Executor = {
-    execute: async (request) => {
-      calls.push(request);
-      return { kind: "completed", output: "done" };
-    }
-  };
-  const service = new RegisteredWorkspaceTaskService(registry(), (root) => {
-    roots.push(root);
-    return executor;
-  });
-  const instruction = "  exact instruction\nwith bytes $()  ";
-
-  const result = await service.execute({ workspace_id: "known", instruction });
-
-  assert.equal(calls.length, 1);
-  assert.deepEqual(roots, [ROOT]);
-  assert.deepEqual(calls, [{ taskId: result.id, instruction }]);
-});
-
-test("passes through completed output", async () => {
-  const output = "exact output";
-  const executor: Executor = {
-    execute: async () => ({ kind: "completed", output })
-  };
+  const executor: Executor = { execute: (request) => { calls.push(request); return pending.promise; } };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
 
-  const result = await service.execute({ workspace_id: "known", instruction: "inspect" });
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
 
-  assert.equal(result.state, "completed");
-  if (result.state === "completed") assert.equal(result.output, output);
+  assert.deepEqual(service.status(taskId), { taskId, state: "queued" });
+  assert.equal(service.result(taskId), undefined);
+  await Promise.resolve();
+  assert.deepEqual(service.status(taskId), { taskId, state: "running" });
+  assert.equal(service.result(taskId), undefined);
+  assert.equal(calls[0]?.taskId, taskId);
+  pending.resolve({ kind: "completed", output: "done" });
+  await waitForTerminal(service, taskId);
 });
 
-test("passes through failed error", async () => {
+test("records completed output and preserves the instruction", async () => {
+  const calls: ExecutorRequest[] = [];
+  const executor: Executor = {
+    execute: async (request) => { calls.push(request); return { kind: "completed", output: "exact output" }; }
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const instruction = "  exact instruction\nwith bytes $()  ";
+  const { taskId } = service.runTask({ workspace_id: "known", instruction });
+
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(calls, [{ taskId, instruction }]);
+  assert.deepEqual(service.status(taskId), { taskId, state: "completed" });
+  assert.deepEqual(service.result(taskId), { id: taskId, state: "completed", output: "exact output" });
+});
+
+test("records executor failures", async () => {
   const error: SerializedError = {
     code: "CODEX_EXECUTION_FAILED",
     message: "Codex execution failed.",
     retryable: false
   };
-  const executor: Executor = {
-    execute: async () => ({ kind: "failed", error })
-  };
+  const executor: Executor = { execute: async () => ({ kind: "failed", error }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
 
-  const result = await service.execute({ workspace_id: "known", instruction: "inspect" });
+  await waitForTerminal(service, taskId);
 
-  assert.equal(result.state, "failed");
-  if (result.state === "failed") assert.equal(result.error, error);
+  assert.deepEqual(service.status(taskId), { taskId, state: "failed" });
+  assert.deepEqual(service.result(taskId), { id: taskId, state: "failed", error });
+});
+
+test("records an unknown workspace asynchronously without creating an executor", async () => {
+  let factories = 0;
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    factories += 1;
+    throw new Error("must not run");
+  });
+  const { taskId } = service.runTask({ workspace_id: "unknown", instruction: "inspect" });
+
+  assert.deepEqual(service.status(taskId), { taskId, state: "queued" });
+  await waitForTerminal(service, taskId);
+
+  assert.equal(factories, 0);
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "UNKNOWN_WORKSPACE",
+      message: "The requested workspace is not registered.",
+      retryable: false
+    }
+  });
+});
+
+test("returns undefined for invalid and unknown task ids", () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    throw new Error("must not run");
+  });
+
+  for (const taskId of [undefined, null, "invalid", "00000000-0000-4000-8000-000000000000"]) {
+    assert.equal(service.status(taskId), undefined);
+    assert.equal(service.result(taskId), undefined);
+  }
+});
+
+test("only exposes supported states", async () => {
+  const pending = deferred<ExecutorResult>();
+  const executor: Executor = { execute: () => pending.promise };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
+  const states = new Set<string>();
+
+  states.add(service.status(taskId)!.state);
+  await Promise.resolve();
+  states.add(service.status(taskId)!.state);
+  pending.resolve({ kind: "completed", output: "done" });
+  await waitForTerminal(service, taskId);
+  states.add(service.status(taskId)!.state);
+
+  for (const state of states) assert.ok(["queued", "running", "completed", "failed"].includes(state));
 });
