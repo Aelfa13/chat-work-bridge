@@ -1,4 +1,10 @@
-export const ERROR_CODES = ["INTERNAL_ERROR", "INVALID_STATE_TRANSITION"] as const;
+export const ERROR_CODES = [
+  "INTERNAL_ERROR",
+  "INVALID_STATE_TRANSITION",
+  "CODEX_UNAVAILABLE",
+  "CODEX_PROTOCOL_ERROR",
+  "CODEX_EXECUTION_FAILED"
+] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
 
@@ -21,11 +27,23 @@ const ERROR_DEFINITIONS: Readonly<Record<ErrorCode, ErrorDefinition>> = {
   INVALID_STATE_TRANSITION: {
     message: "The requested state transition is not allowed.",
     retryable: false
+  },
+  CODEX_UNAVAILABLE: {
+    message: "Codex is unavailable.",
+    retryable: false
+  },
+  CODEX_PROTOCOL_ERROR: {
+    message: "Codex returned an invalid response.",
+    retryable: false
+  },
+  CODEX_EXECUTION_FAILED: {
+    message: "Codex execution failed.",
+    retryable: false
   }
 };
 
 function isErrorCode(value: unknown): value is ErrorCode {
-  return value === "INTERNAL_ERROR" || value === "INVALID_STATE_TRANSITION";
+  return ERROR_CODES.some((code) => code === value);
 }
 
 export class CoreError extends Error {

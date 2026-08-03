@@ -10,6 +10,7 @@ export type TaskSnapshot =
   | {
     readonly id: Id;
     readonly state: "completed";
+    readonly output: string;
   }
   | {
     readonly id: Id;
@@ -40,7 +41,7 @@ export class TaskOrchestrator {
     if (result.kind === "completed") {
       assertTransition(state, "completed");
       state = "completed";
-      return { id: taskId, state };
+      return { id: taskId, state, output: result.output };
     }
 
     assertTransition(state, "failed");

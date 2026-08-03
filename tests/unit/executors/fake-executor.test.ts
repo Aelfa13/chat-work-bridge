@@ -14,7 +14,7 @@ function request(taskId: string, instruction: string): ExecutorRequest {
 }
 
 test("returns the configured completed result", async () => {
-  const result: ExecutorResult = { kind: "completed" };
+  const result: ExecutorResult = { kind: "completed", output: "done" };
   const executor = new FakeExecutor(result);
 
   assert.equal(await executor.execute(request("550e8400-e29b-41d4-a716-446655440000", "inspect")), result);
@@ -35,7 +35,7 @@ test("returns the configured failed result", async () => {
 });
 
 test("records requests in call order", async () => {
-  const executor = new FakeExecutor({ kind: "completed" });
+  const executor = new FakeExecutor({ kind: "completed", output: "done" });
   const first = request("550e8400-e29b-41d4-a716-446655440002", "first instruction");
   const second = request("550e8400-e29b-41d4-a716-446655440003", "second instruction");
 
@@ -46,7 +46,7 @@ test("records requests in call order", async () => {
 });
 
 test("returns a copy of the recorded calls", async () => {
-  const executor = new FakeExecutor({ kind: "completed" });
+  const executor = new FakeExecutor({ kind: "completed", output: "done" });
   const first = request("550e8400-e29b-41d4-a716-446655440004", "inspect");
 
   await executor.execute(first);

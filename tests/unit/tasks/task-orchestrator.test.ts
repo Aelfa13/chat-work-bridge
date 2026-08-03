@@ -23,13 +23,16 @@ class RejectingExecutor implements Executor {
 }
 
 test("returns a completed snapshot and preserves the instruction", async () => {
-  const executor = new FakeExecutor({ kind: "completed" });
+  const executor = new FakeExecutor({ kind: "completed", output: "inspection result" });
   const orchestrator = new TaskOrchestrator(executor);
   const instruction = "  inspect exactly this  ";
 
   const snapshot = await orchestrator.execute(instruction);
 
   assert.equal(snapshot.state, "completed");
+  if (snapshot.state === "completed") {
+    assert.equal(snapshot.output, "inspection result");
+  }
   assert.equal(isId(snapshot.id), true);
   assert.equal(executor.calls.length, 1);
   assert.deepEqual(executor.calls, [{ taskId: snapshot.id, instruction }]);

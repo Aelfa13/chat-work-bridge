@@ -1,7 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CoreError, serializeError } from "../../src/core/errors.js";
+import { CoreError, ERROR_CODES, serializeError } from "../../src/core/errors.js";
+
+test("exposes the Codex error codes", () => {
+  assert.deepEqual(ERROR_CODES, [
+    "INTERNAL_ERROR",
+    "INVALID_STATE_TRANSITION",
+    "CODEX_UNAVAILABLE",
+    "CODEX_PROTOCOL_ERROR",
+    "CODEX_EXECUTION_FAILED"
+  ]);
+  assert.deepEqual(serializeError(new CoreError("CODEX_UNAVAILABLE")), {
+    code: "CODEX_UNAVAILABLE", message: "Codex is unavailable.", retryable: false
+  });
+  assert.deepEqual(serializeError(new CoreError("CODEX_PROTOCOL_ERROR")), {
+    code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response.", retryable: false
+  });
+  assert.deepEqual(serializeError(new CoreError("CODEX_EXECUTION_FAILED")), {
+    code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed.", retryable: false
+  });
+});
 
 test("serializeError exposes an allowlisted core error", () => {
   const serialized = serializeError(new CoreError("INVALID_STATE_TRANSITION"));

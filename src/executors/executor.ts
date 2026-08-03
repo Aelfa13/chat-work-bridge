@@ -7,7 +7,7 @@ export interface ExecutorRequest {
 }
 
 export type ExecutorResult =
-  | { readonly kind: "completed" }
+  | { readonly kind: "completed"; readonly output: string }
   | {
     readonly kind: "failed";
     readonly error: SerializedError;
