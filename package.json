@@ -1,9 +1,19 @@
 {
   "name": "engineering-bridge",
-  "version": "0.0.0",
-  "private": true,
+  "version": "0.1.0-alpha.0",
   "description": "A local-first, read-only bridge from an MCP client to a registered Codex workspace.",
   "type": "module",
+  "files": [
+    "dist/src/**",
+    "config/workspaces.example.json",
+    "README.md",
+    "README.zh-CN.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "engineering-bridge": "dist/src/mcp-stdio.js"
+  },
   "engines": {
     "node": ">=22"
   },
@@ -11,7 +21,8 @@
     "typecheck": "tsc --noEmit",
     "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc",
     "test": "npm run build && node --test \"dist/tests/unit/**/*.test.js\"",
-    "mcp:stdio": "node dist/src/mcp-stdio.js"
+    "mcp:stdio": "node dist/src/mcp-stdio.js",
+    "prepack": "npm run build"
   },
   "keywords": [
     "mcp",
@@ -19,7 +30,7 @@
     "local-first",
     "read-only"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "22.20.1",
     "typescript": "5.8.3"

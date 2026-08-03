@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { readFile } from "node:fs/promises";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -39,7 +41,7 @@ async function main(): Promise<void> {
     registry,
     (workspaceRoot) => new CodexExecutor(workspaceRoot)
   );
-  const server = new McpServer({ name: "engineering-bridge", version: "0.0.0" });
+  const server = new McpServer({ name: "engineering-bridge", version: "0.1.0-alpha.0" });
 
   server.registerTool("run_task", {
     inputSchema: {
