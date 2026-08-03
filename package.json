@@ -1,0 +1,19 @@
+{
+  "name": "engineering-bridge",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A local-first, read-only bridge from an MCP client to a registered Codex workspace.",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.json",
+    "test": "node --test"
+  },
+  "keywords": [
+    "mcp",
+    "codex",
+    "local-first",
+    "read-only"
+  ],
+  "license": "UNLICENSED"
+}
