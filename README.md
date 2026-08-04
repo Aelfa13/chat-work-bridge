@@ -72,6 +72,30 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 Connect that process to an MCP client as a local STDIO server. There is no HTTP or remote transport.
 
+### Workspace access and controlled writes
+
+The bridge can access only workspaces that a trusted local operator has registered in `workspaces.json` before startup. An MCP caller selects a registered `workspace_id`; it cannot register or supply a new path dynamically. `UNKNOWN_WORKSPACE` means that the requested ID is not registered, so the access boundary is working—it does not grant automatic access to the host.
+
+For example, this configuration provides one read-only workspace and one Git workspace with controlled writes enabled:
+
+```json
+[
+  {
+    "id": "docs",
+    "root": "/absolute/path/to/docs"
+  },
+  {
+    "id": "example-app",
+    "root": "/absolute/path/to/example-app",
+    "allow_write": true
+  }
+]
+```
+
+`allow_write` is granted per workspace and defaults to `false`. When it is explicitly enabled, the bridge can generate and apply a controlled patch only if the workspace is clean, its configured root is the Git top-level, and every target is an existing tracked regular text file. `generate_controlled_patch` produces a diff for review but does not modify the workspace. `apply_controlled_patch` runs only after the caller supplies the exact confirmation `APPLY`, then rechecks HEAD, the worktree, and the patch before applying it. The bridge does not automatically run tests, stage, commit, or push.
+
+If a request returns `UNKNOWN_WORKSPACE`, check the workspace ID spelling, confirm that Bridge was started with the intended configuration file, verify that `root` is an absolute path, and restart Bridge after changing `workspaces.json`.
+
 ## Tools and task flow
 
 The server exposes exactly five tools:
@@ -88,7 +112,7 @@ Tasks and results exist only in process memory and disappear when the server res
 
 For every task, the bridge launches local Codex with a fixed read-only sandbox, approval set to `never`, an ephemeral session, and network access disabled. It does not invoke a shell, and the child process receives only a small allowlist of inherited environment fields. The instruction is sent on standard input rather than placed in caller-controlled arguments.
 
-The current implementation has no HTTP server, remote transport, database, persistence, UI, accounts, automatic tests, staging, commits, or pushes. Controlled patch generation verifies that an enabled root is exactly its Git top-level; ordinary read-only tasks do not require a Git repository. The bridge does not resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.
+The current public release provides only local STDIO transport and local Codex workspace capabilities. It has no HTTP server, SSH or remote-server access, container upgrades, service restarts, arbitrary shell execution, database, persistence, UI, accounts, automatic tests, staging, commits, or pushes. A registered local code workspace is not a remote deployment-maintenance capability; remote operations require a separately implemented, restricted execution entry point and cannot be enabled by registering an ordinary workspace. Controlled patch generation verifies that an enabled root is exactly its Git top-level; ordinary read-only tasks do not require a Git repository. The bridge does not resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.
 
 ## Acknowledgements
 Engineering Bridge was conceived and directed by wudy29 and developed in close collaboration with ChatGPT-Demu, with Codex assisting implementation and verification.
