@@ -45,7 +45,7 @@ test("returns immediately and exposes queued/running without a result", async ()
 test("records completed output and preserves the instruction", async () => {
   const calls: ExecutorRequest[] = [];
   const executor: Executor = {
-    execute: async (request) => { calls.push(request); return { kind: "completed", output: "exact output" }; }
+    execute: async (request) => { calls.push(request); return { kind: "completed", output: "exact output\n\n" }; }
   };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
   const instruction = "  exact instruction\nwith bytes $()  ";
@@ -55,7 +55,27 @@ test("records completed output and preserves the instruction", async () => {
 
   assert.deepEqual(calls, [{ taskId, instruction }]);
   assert.deepEqual(service.status(taskId), { taskId, state: "completed" });
-  assert.deepEqual(service.result(taskId), { id: taskId, state: "completed", output: "exact output" });
+  assert.deepEqual(service.result(taskId), { id: taskId, state: "completed", output: "exact output\n\n" });
+});
+
+test("applies a completed-output transform exactly once before storing the result", async () => {
+  let transforms = 0;
+  const executor: Executor = { execute: async () => ({ kind: "completed", output: "raw" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask(
+    { workspace_id: "known", instruction: "inspect" },
+    (output) => { transforms += 1; return `${output}-transformed`; }
+  );
+
+  await waitForTerminal(service, taskId);
+
+  assert.equal(transforms, 1);
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "completed",
+    output: "raw-transformed"
+  });
+  assert.equal(transforms, 1);
 });
 
 test("records executor failures", async () => {

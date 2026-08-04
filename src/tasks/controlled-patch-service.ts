@@ -41,7 +41,7 @@ export class ControlledPatchService {
     const { taskId } = this.tasks.runTask({
       workspace_id: request.workspace_id,
       instruction: PATCH_INSTRUCTION(request.change_request)
-    });
+    }, normalizeTrailingLf);
     this.proposals.set(taskId, {
       workspaceId: request.workspace_id,
       workspaceRoot,
@@ -118,6 +118,10 @@ export class ControlledPatchService {
       child.stdin.end(input);
     });
   }
+}
+
+function normalizeTrailingLf(output: string): string {
+  return `${output.replace(/\n*$/u, "")}\n`;
 }
 
 function parsePatch(patch: string): string[] {

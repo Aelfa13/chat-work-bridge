@@ -88,6 +88,43 @@ test("generation records base metadata, binds the task, and keeps Codex instruct
   );
 });
 
+test("stores and applies a controlled patch normalized to one trailing LF", async () => {
+  const root = repository();
+  const patchWithoutFinalLf = validPatch.slice(0, -1);
+  const { controlled, tasks } = fixture(root, async () => ({
+    kind: "completed",
+    output: patchWithoutFinalLf
+  }));
+
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  await terminal(tasks, generated.taskId);
+
+  assert.deepEqual(tasks.result(generated.taskId), {
+    id: generated.taskId,
+    state: "completed",
+    output: validPatch
+  });
+  await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("collapses extra trailing LFs in controlled patch results", async () => {
+  const root = repository();
+  const { controlled, tasks } = fixture(root, async () => ({
+    kind: "completed",
+    output: `${validPatch}\n\n`
+  }));
+
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  await terminal(tasks, generated.taskId);
+
+  assert.deepEqual(tasks.result(generated.taskId), {
+    id: generated.taskId,
+    state: "completed",
+    output: validPatch
+  });
+});
+
 test("requires exact confirmation and a successfully completed generation task", async () => {
   const root = repository();
   let finish!: (result: ExecutorResult) => void;

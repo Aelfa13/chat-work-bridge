@@ -23,6 +23,7 @@ export type RegisteredWorkspaceTaskResult =
   };
 
 export type ExecutorFactory = (workspaceRoot: string) => Executor;
+export type CompletedOutputTransform = (output: string) => string;
 
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
 
@@ -38,10 +39,13 @@ export class RegisteredWorkspaceTaskService {
     private readonly executorFactory: ExecutorFactory
   ) {}
 
-  runTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
+  runTask(
+    request: RegisteredWorkspaceTaskRequest,
+    completedOutputTransform?: CompletedOutputTransform
+  ): { taskId: Id } {
     const taskId = newId();
     this.tasks.set(taskId, { state: "queued" });
-    queueMicrotask(() => void this.run(taskId, request));
+    queueMicrotask(() => void this.run(taskId, request, completedOutputTransform));
     return { taskId };
   }
 
@@ -57,14 +61,24 @@ export class RegisteredWorkspaceTaskService {
     return task?.state === "completed" || task?.state === "failed" ? task.result : undefined;
   }
 
-  private async run(taskId: Id, request: RegisteredWorkspaceTaskRequest): Promise<void> {
+  private async run(
+    taskId: Id,
+    request: RegisteredWorkspaceTaskRequest,
+    completedOutputTransform?: CompletedOutputTransform
+  ): Promise<void> {
     this.tasks.set(taskId, { state: "running" });
     try {
       const workspaceRoot = this.registry.resolve(request.workspace_id);
       const executor = this.executorFactory(workspaceRoot);
       const result = await executor.execute({ taskId, instruction: request.instruction });
       const taskResult: RegisteredWorkspaceTaskResult = result.kind === "completed"
-        ? { id: taskId, state: "completed", output: result.output }
+        ? {
+          id: taskId,
+          state: "completed",
+          output: completedOutputTransform === undefined
+            ? result.output
+            : completedOutputTransform(result.output)
+        }
         : { id: taskId, state: "failed", error: result.error };
       this.tasks.set(taskId, { state: taskResult.state, result: taskResult });
     } catch (error) {

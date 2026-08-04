@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     (workspaceRoot) => new CodexExecutor(workspaceRoot)
   );
   const controlledPatches = new ControlledPatchService(registry, service);
-  const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.0" });
+  const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.1" });
 
   server.registerTool("run_task", {
     inputSchema: {
