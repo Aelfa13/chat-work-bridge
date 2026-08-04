@@ -8,7 +8,7 @@ This is alpha software. Run it only on a machine you control, and have a trusted
 
 ## In plain English
 
-Engineering Bridge replaces the manual copying of prompts and answers between a ChatGPT or MCP client and Codex on your computer. The client can give local Codex a task in a workspace that a trusted operator has already registered, check its progress, and bring the final answer back.
+Engineering Bridge connects ChatGPT's Chat or Work entry point to the Codex CLI on your computer, replacing the need to copy prompts and answers by hand. Through Engineering Bridge, ChatGPT can give the local Codex CLI a task in a workspace that a trusted operator has already registered, check its progress, and bring the final answer back. Engineering Bridge also works with other apps that support local STDIO MCP tool calls.
 
 ## Before and after
 
@@ -26,11 +26,11 @@ The current bridge is useful for read-only questions such as:
 
 ## One complete conversation
 
-1. You ask in your ChatGPT or MCP client: “Where is login handled, and what should I know before changing it?”
-2. The client submits that task for one registered local workspace.
-3. Engineering Bridge starts local Codex with read-only access.
-4. The client checks the task status while Codex examines the workspace.
-5. When the task finishes, the client retrieves Codex's final answer and shows it to you.
+1. You ask in ChatGPT's Chat or Work entry point: “Where is login handled, and what should I know before changing it?”
+2. ChatGPT sends the task through Engineering Bridge to the local Codex CLI for one registered workspace.
+3. Engineering Bridge starts the local Codex CLI with read-only access.
+4. ChatGPT checks the task status while Codex examines the workspace.
+5. When the task finishes, ChatGPT retrieves Codex's final answer through Engineering Bridge and shows it to you.
 
 ## Current limits
 

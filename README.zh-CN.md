@@ -8,7 +8,7 @@ Engineering Bridge 0.2.0-alpha 是一个小型本地 STDIO MCP 服务器。它�
 
 ## 一句话说明
 
-Engineering Bridge 替代了 ChatGPT 或 MCP 客户端与本机 Codex 之间手工复制提示词和答案的过程。客户端可以把任务交给已由可信操作员登记的工作区中的本机 Codex，查询进度，再取回最终答案。
+Engineering Bridge 把 ChatGPT 的 Chat 或 Work 入口连接到本机 Codex CLI，省去手工复制提示词和答案的过程。通过 Engineering Bridge，ChatGPT 可以把任务交给本机 Codex CLI，让它在可信操作员已登记的工作区中执行，查询进度，再取回最终答案。Engineering Bridge 也兼容其他支持本地 STDIO MCP 工具调用的应用。
 
 ## 使用前后
 
@@ -26,11 +26,11 @@ Engineering Bridge 替代了 ChatGPT 或 MCP 客户端与本机 Codex 之间手�
 
 ## 一次完整的对话流程
 
-1. 你在 ChatGPT 或 MCP 客户端中提问：“登录功能在哪里实现？修改前需要注意什么？”
-2. 客户端把任务提交到一个已登记的本地工作区。
-3. Engineering Bridge 以只读权限启动本机 Codex。
-4. Codex 检查工作区时，客户端查询任务状态。
-5. 任务完成后，客户端取回 Codex 的最终答案并展示给你。
+1. 你在 ChatGPT 的 Chat 或 Work 入口中提问：“登录功能在哪里实现？修改前需要注意什么？”
+2. ChatGPT 通过 Engineering Bridge，把任务交给本机 Codex CLI，并指定一个已登记的工作区。
+3. Engineering Bridge 以只读权限启动本机 Codex CLI。
+4. Codex 检查工作区时，ChatGPT 查询任务状态。
+5. 任务完成后，ChatGPT 通过 Engineering Bridge 取回 Codex 的最终答案并展示给你。
 
 ## 当前边界
 
