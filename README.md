@@ -6,6 +6,38 @@ This is alpha software. Run it only on a machine you control, and have a trusted
 
 [简体中文](README.zh-CN.md)
 
+## In plain English
+
+Engineering Bridge replaces the manual copying of prompts and answers between a ChatGPT or MCP client and Codex on your computer. The client can give local Codex a task in a workspace that a trusted operator has already registered, check its progress, and bring the final answer back.
+
+## Before and after
+
+Before: you copy a question from the client, paste it into Codex, wait, and copy the answer back.
+
+After: the client submits the same question through Engineering Bridge, checks whether it is finished, and retrieves the answer for you.
+
+## What you can ask today
+
+The current bridge is useful for read-only questions such as:
+
+- “Summarize the code changes in this workspace.”
+- “Find where this behavior is implemented and explain it.”
+- “Review this code for risks without changing anything.”
+
+## One complete conversation
+
+1. You ask in your ChatGPT or MCP client: “Where is login handled, and what should I know before changing it?”
+2. The client submits that task for one registered local workspace.
+3. Engineering Bridge starts local Codex with read-only access.
+4. The client checks the task status while Codex examines the workspace.
+5. When the task finishes, the client retrieves Codex's final answer and shows it to you.
+
+## Current limits
+
+This version can inspect a registered workspace and return text, but it cannot write or edit files. It does not automatically commit or push changes.
+
+There is no HTTP service, UI, or account system. Tasks and answers are not persisted, and running tasks cannot be cancelled and have no timeout.
+
 ## Requirements
 
 - Node.js 22 or newer
