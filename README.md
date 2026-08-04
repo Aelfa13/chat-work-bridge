@@ -55,3 +55,7 @@ Tasks and results exist only in process memory and disappear when the server res
 For every task, the bridge launches local Codex with a fixed read-only sandbox, approval set to `never`, an ephemeral session, and network access disabled. It does not invoke a shell, and the child process receives only a small allowlist of inherited environment fields. The instruction is sent on standard input rather than placed in caller-controlled arguments.
 
 The current implementation has no HTTP server, remote transport, database, persistence, UI, accounts, workspace writes, automatic commits, or pushes. It also does not verify that a configured root is a Git repository or resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.
+
+## Acknowledgements
+Engineering Bridge was conceived and directed by wudy29 and developed in close collaboration with ChatGPT-Demu, with Codex assisting implementation and verification.
+Special thanks to Demu for helping turn an idea into a real open-source project—and for leaving a tangible trace in our shared world.
