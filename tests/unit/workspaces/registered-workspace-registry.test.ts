@@ -16,6 +16,17 @@ test("returns the fixed root for a registered id", () => {
   assert.equal(registry.resolve("known"), ROOT);
 });
 
+test("write access defaults to denied and must be explicitly enabled", () => {
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "default", root: ROOT },
+    { id: "enabled", root: "/write/root", allow_write: true }
+  ]);
+
+  expectCode(() => registry.resolveWritable("default"), "WORKSPACE_PRECONDITION_FAILED");
+  assert.equal(registry.resolveWritable("enabled"), "/write/root");
+  assert.equal(registry.resolve("default"), ROOT);
+});
+
 test("rejects an unknown id", () => {
   const registry = new RegisteredWorkspaceRegistry([{ id: "known", root: ROOT }]);
 
@@ -40,4 +51,8 @@ test("rejects relative, non-normalized, or empty configuration fields", () => {
   for (const entries of invalidEntries) {
     expectCode(() => new RegisteredWorkspaceRegistry(entries), "WORKSPACE_BOUNDARY_VIOLATION");
   }
+  expectCode(
+    () => new RegisteredWorkspaceRegistry([{ id: "known", root: ROOT, allow_write: "yes" }] as never),
+    "WORKSPACE_BOUNDARY_VIOLATION"
+  );
 });

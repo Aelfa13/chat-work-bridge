@@ -8,11 +8,13 @@ import { z } from "zod";
 
 import { CodexExecutor } from "./executors/codex-executor.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
+import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
 import { RegisteredWorkspaceRegistry } from "./workspaces/registered-workspace-registry.js";
 
 const WorkspaceConfigSchema = z.array(z.object({
   id: z.string().min(1),
-  root: z.string().min(1)
+  root: z.string().min(1),
+  allow_write: z.boolean().optional()
 }).strict());
 
 function jsonContent(value: unknown) {
@@ -41,7 +43,8 @@ async function main(): Promise<void> {
     registry,
     (workspaceRoot) => new CodexExecutor(workspaceRoot)
   );
-  const server = new McpServer({ name: "engineering-bridge", version: "0.1.0-alpha.0" });
+  const controlledPatches = new ControlledPatchService(registry, service);
+  const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.0" });
 
   server.registerTool("run_task", {
     inputSchema: {
@@ -77,6 +80,25 @@ async function main(): Promise<void> {
       ? jsonContent({ task_id: result.id, state: result.state, output: result.output })
       : jsonContent({ task_id: result.id, state: result.state, error: result.error });
   });
+
+  server.registerTool("generate_controlled_patch", {
+    inputSchema: {
+      workspace_id: z.string().min(1),
+      change_request: z.string().min(1)
+    }
+  }, async ({ workspace_id, change_request }) => {
+    const proposal = await controlledPatches.generate({ workspace_id, change_request });
+    return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
+  });
+
+  server.registerTool("apply_controlled_patch", {
+    inputSchema: {
+      patch_task_id: z.string().min(1),
+      confirmation: z.literal("APPLY")
+    }
+  }, async ({ patch_task_id, confirmation }) => jsonContent(
+    await controlledPatches.apply({ patch_task_id, confirmation })
+  ));
 
   await server.connect(new StdioServerTransport());
 }

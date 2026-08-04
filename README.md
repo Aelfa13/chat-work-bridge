@@ -1,6 +1,6 @@
 # Engineering Bridge
 
-Engineering Bridge 0.1.0-alpha is a small local STDIO MCP server. It sends an instruction to the locally installed Codex CLI in a configured workspace and returns Codex's final text to the MCP client.
+Engineering Bridge 0.2.0-alpha is a small local STDIO MCP server. It sends an instruction to the locally installed Codex CLI in a configured workspace and returns Codex's final text to the MCP client. It can also apply a narrowly validated patch after explicit review and confirmation.
 
 This is alpha software. Run it only on a machine you control, and have a trusted local operator maintain the workspace configuration.
 
@@ -34,7 +34,7 @@ The current bridge is useful for read-only questions such as:
 
 ## Current limits
 
-This version can inspect a registered workspace and return text, but it cannot write or edit files. It does not automatically commit or push changes.
+Read-only tasks remain available in every registered workspace. Controlled writes are disabled by default and can only modify existing tracked regular text files in explicitly enabled Git workspaces. The bridge never automatically runs tests, stages, commits, or pushes changes.
 
 There is no HTTP service, UI, or account system. Tasks and answers are not persisted, and running tasks cannot be cancelled and have no timeout.
 
@@ -60,7 +60,7 @@ Copy the example configuration and edit it:
 cp config/workspaces.example.json workspaces.json
 ```
 
-Each entry maps a caller-visible ID to a workspace root. `root` must be an absolute, normalized path (for example, `/home/alice/projects/example`, not a relative path or a path containing `..`). The file is trusted local configuration; MCP callers cannot register workspace roots.
+Each entry maps a caller-visible ID to a workspace root. `root` must be an absolute, normalized path (for example, `/home/alice/projects/example`, not a relative path or a path containing `..`). Optional `allow_write` defaults to `false`; set it to `true` only for a workspace where controlled patch application is intended. The file is trusted local configuration; MCP callers cannot register workspace roots.
 
 After building, start the STDIO server with either command:
 
@@ -74,11 +74,13 @@ Connect that process to an MCP client as a local STDIO server. There is no HTTP 
 
 ## Tools and task flow
 
-The server exposes exactly three tools:
+The server exposes exactly five tools:
 
 1. `run_task` accepts `workspace_id` and `instruction`, queues the work, and returns a `task_id`.
 2. `task_status` accepts the `task_id`; poll it until the state is `completed` or `failed`.
 3. `task_result` accepts the `task_id` and returns the final Codex text or a safe error after the task reaches a terminal state.
+4. `generate_controlled_patch` accepts only `workspace_id` and `change_request`. For a write-enabled, clean Git worktree at its repository root, it records HEAD, starts the same read-only Codex executor, and returns `task_id` and `base_head`. Use `task_status` and `task_result` to poll and review the textual diff.
+5. `apply_controlled_patch` accepts only that `patch_task_id` and exact confirmation `APPLY`. It rechecks the root, HEAD, and clean tracked state, validates the reviewed patch, and applies it once with fixed `git apply --check` and `git apply` calls.
 
 Tasks and results exist only in process memory and disappear when the server restarts.
 
@@ -86,7 +88,7 @@ Tasks and results exist only in process memory and disappear when the server res
 
 For every task, the bridge launches local Codex with a fixed read-only sandbox, approval set to `never`, an ephemeral session, and network access disabled. It does not invoke a shell, and the child process receives only a small allowlist of inherited environment fields. The instruction is sent on standard input rather than placed in caller-controlled arguments.
 
-The current implementation has no HTTP server, remote transport, database, persistence, UI, accounts, workspace writes, automatic commits, or pushes. It also does not verify that a configured root is a Git repository or resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.
+The current implementation has no HTTP server, remote transport, database, persistence, UI, accounts, automatic tests, staging, commits, or pushes. Controlled patch generation verifies that an enabled root is exactly its Git top-level; ordinary read-only tasks do not require a Git repository. The bridge does not resolve real paths to enforce symlink containment. There is no task cancellation or timeout. See [SECURITY.md](SECURITY.md) before use.
 
 ## Acknowledgements
 Engineering Bridge was conceived and directed by wudy29 and developed in close collaboration with ChatGPT-Demu, with Codex assisting implementation and verification.

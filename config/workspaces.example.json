@@ -1,6 +1,7 @@
 [
   {
     "id": "example-project",
-    "root": "/absolute/path/to/project"
+    "root": "/absolute/path/to/project",
+    "allow_write": false
   }
 ]

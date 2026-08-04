@@ -1,7 +1,7 @@
 {
   "name": "engineering-bridge",
-  "version": "0.1.0-alpha.0",
-  "description": "A local-first, read-only bridge from an MCP client to a registered Codex workspace.",
+  "version": "0.2.0-alpha.0",
+  "description": "A local-first MCP bridge for read-only Codex tasks and opt-in controlled patch application.",
   "type": "module",
   "files": [
     "dist/src/**",
@@ -28,7 +28,8 @@
     "mcp",
     "codex",
     "local-first",
-    "read-only"
+    "read-only",
+    "controlled-patch"
   ],
   "license": "MIT",
   "devDependencies": {
