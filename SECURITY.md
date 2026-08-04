@@ -1,6 +1,6 @@
 # Security Policy
 
-Engineering Bridge 0.2.0-alpha connects an MCP client to a local Codex CLI. Treat both the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service.
+Engineering Bridge v0.2.0-alpha.1 connects an MCP client to a local Codex CLI. Treat both the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service.
 
 ## Current enforced controls
 
@@ -11,7 +11,7 @@ Engineering Bridge 0.2.0-alpha connects an MCP client to a local Codex CLI. Trea
 - The Codex child receives a small allowlist of inherited environment fields.
 - Returned execution failures use fixed error codes and messages rather than forwarding Codex stderr or raw internal errors.
 - Tasks and results are held only in process memory.
-- Workspace writes default to disabled. Patch generation requires an explicitly enabled workspace whose root equals its Git top-level, a clean tracked worktree/index, and a recorded HEAD. Codex remains read-only.
+- Workspace writes default to disabled. Patch generation requires an explicitly enabled workspace whose canonical real path equals its Git top-level, a clean tracked worktree/index, and a recorded HEAD. Codex remains read-only.
 - Application requires the completed proposal task and exact `APPLY` confirmation, then rechecks root, HEAD, and cleanliness. It rejects non-unified, binary, mode, symlink, rename/copy, add/delete, unsafe-path, and non-tracked-regular-file changes. Fixed no-shell `git apply --check` and `git apply` calls receive the patch on standard input; application is once only and never runs tests, stages, commits, or pushes.
 
 ## Current limitations

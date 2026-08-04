@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
@@ -89,7 +90,17 @@ export class ControlledPatchService {
 
   private async verifyWorkspace(workspaceRoot: string): Promise<string> {
     const topLevel = (await this.git(workspaceRoot, ["rev-parse", "--show-toplevel"])).trim();
-    if (resolve(topLevel) !== resolve(workspaceRoot)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    let canonicalTopLevel: string;
+    let canonicalWorkspaceRoot: string;
+    try {
+      [canonicalTopLevel, canonicalWorkspaceRoot] = await Promise.all([
+        realpath(resolve(topLevel)),
+        realpath(resolve(workspaceRoot))
+      ]);
+    } catch {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    if (canonicalTopLevel !== canonicalWorkspaceRoot) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     const status = await this.git(workspaceRoot, ["status", "--porcelain", "--untracked-files=no"]);
     if (status.length !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     const head = (await this.git(workspaceRoot, ["rev-parse", "HEAD"])).trim();

@@ -47,6 +47,7 @@ async function main(): Promise<void> {
   const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.1" });
 
   server.registerTool("run_task", {
+    description: "Run a read-only Codex task in a pre-registered workspace. This tool does not modify workspace files.",
     inputSchema: {
       workspace_id: z.string().min(1),
       instruction: z.string().min(1)
@@ -57,6 +58,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("task_status", {
+    description: "Check the current state of a task. This tool is read-only.",
     inputSchema: { task_id: z.string() }
   }, ({ task_id }) => {
     const status = service.status(task_id);
@@ -66,6 +68,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("task_result", {
+    description: "Retrieve the completed output or safe error for a task. This tool is read-only.",
     inputSchema: { task_id: z.string() }
   }, ({ task_id }) => {
     const status = service.status(task_id);
@@ -82,6 +85,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("generate_controlled_patch", {
+    description: "Generate a read-only patch proposal for review in a write-enabled Git workspace; it does not apply changes.",
     inputSchema: {
       workspace_id: z.string().min(1),
       change_request: z.string().min(1)
@@ -92,6 +96,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("apply_controlled_patch", {
+    description: "Apply one reviewed patch proposal after exact APPLY confirmation. This tool can modify validated tracked text files but never stages, commits, or pushes.",
     inputSchema: {
       patch_task_id: z.string().min(1),
       confirmation: z.literal("APPLY")

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -86,6 +86,51 @@ test("generation records base metadata, binds the task, and keeps Codex instruct
     () => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }),
     "INVALID_STATE_TRANSITION"
   );
+});
+
+test("accepts a normal absolute Git top-level path", async () => {
+  const root = repository();
+  const { controlled } = fixture(root, async () => ({ kind: "completed", output: validPatch }));
+
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+
+  assert.equal(generated.baseHead, git(root, "rev-parse", "HEAD").trim());
+});
+
+test("accepts a symlink alias that resolves to the same Git top-level", async () => {
+  const root = repository();
+  const aliasParent = realpathSync(mkdtempSync(join(tmpdir(), "engineering-bridge-alias-")));
+  const alias = join(aliasParent, "workspace-alias");
+  symlinkSync(root, alias, "dir");
+  const { controlled } = fixture(alias, async () => ({ kind: "completed", output: validPatch }));
+
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+
+  assert.equal(generated.baseHead, git(root, "rev-parse", "HEAD").trim());
+});
+
+test("rejects a different directory, a Git subdirectory, and a missing workspace", async () => {
+  const root = repository();
+  const other = repository();
+  const nested = join(root, "nested");
+  mkdirSync(nested);
+
+  for (const invalidRoot of [other, nested, join(root, "missing")]) {
+    const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root: invalidRoot, allow_write: true }]);
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, (executable, args, options) => {
+      if (args[0] === "rev-parse" && args[1] === "--show-toplevel" && invalidRoot === other) {
+        return spawn(executable, args, { ...options, cwd: root });
+      }
+      return spawn(executable, args, options);
+    });
+    await expectCode(
+      () => controlled.generate({ workspace_id: "workspace", change_request: "change note" }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  }
 });
 
 test("stores and applies a controlled patch normalized to one trailing LF", async () => {

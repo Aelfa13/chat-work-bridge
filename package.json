@@ -6,9 +6,12 @@
   "files": [
     "dist/src/**",
     "config/workspaces.example.json",
+    "docs/**",
     "README.md",
     "README.zh-CN.md",
+    "RELEASE_NOTES.md",
     "SECURITY.md",
+    "CONTRIBUTING.md",
     "LICENSE"
   ],
   "bin": {
