@@ -12,9 +12,9 @@ Engineering Bridge connects ChatGPT's Chat or Work entry point to the Codex CLI 
 
 ## Before and after
 
-Before: you copy a question from the client, paste it into Codex, wait, and copy the answer back.
+Before: in Chat or Work, you describe the task; then you open the local Codex CLI, restate the task, wait, and bring the answer back to the conversation.
 
-After: the client submits the same question through Engineering Bridge, checks whether it is finished, and retrieves the answer for you.
+After: you describe the task once in Chat or Work. Engineering Bridge sends it to the local Codex CLI, checks its status, and brings the answer back to the current conversation.
 
 ## What you can ask today
 

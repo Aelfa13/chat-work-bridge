@@ -12,9 +12,9 @@ Engineering Bridge 把 ChatGPT 的 Chat 或 Work 入口连接到本机 Codex CLI
 
 ## 使用前后
 
-使用前：你从客户端复制问题，粘贴给 Codex，等待完成，再把答案复制回去。
+使用前：你在 Chat 或 Work 里说明任务，再打开本机 Codex CLI 重述一遍，等待完成后把结果带回对话。
 
-使用后：客户端通过 Engineering Bridge 提交同一个问题，检查是否完成，并替你取回答案。
+使用后：你只需在 Chat 或 Work 里说一次。Engineering Bridge 会把任务交给本机 Codex CLI、查询进度，并把结果带回当前对话。
 
 ## 当前可以问什么
 
