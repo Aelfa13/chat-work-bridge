@@ -1,6 +1,6 @@
 # Architecture
 
-Engineering Bridge v0.2.0-alpha.1 is a local STDIO MCP server with four small layers:
+Engineering Bridge v0.2.0-alpha.2 is a local STDIO MCP server with four small layers:
 
 1. `src/mcp-stdio.ts` loads trusted workspace configuration, registers five tools, and connects the MCP STDIO transport.
 2. `RegisteredWorkspaceRegistry` maps fixed caller-visible IDs to absolute configured roots. MCP callers cannot register paths.

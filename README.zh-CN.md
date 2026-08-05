@@ -1,4 +1,4 @@
-# Engineering Bridge v0.2.0-alpha.1
+# Engineering Bridge v0.2.0-alpha.2
 
 Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Codex CLI 检查已登记的代码工作区：聊天客户端理解你的要求，Codex 在本机读取代码，Bridge 负责连接两者。工作区默认只读；启用受控写入后，也必须先生成补丁提案（patch proposal）供审阅，只有精确确认 `APPLY` 才会应用。
 

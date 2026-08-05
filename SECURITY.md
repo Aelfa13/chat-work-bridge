@@ -1,6 +1,6 @@
 # Security Policy
 
-Engineering Bridge v0.2.0-alpha.1 connects an MCP client to a local Codex CLI. Treat both the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service.
+Engineering Bridge v0.2.0-alpha.2 connects an MCP client to a local Codex CLI. Treat both the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service.
 
 ## Current enforced controls
 

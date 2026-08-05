@@ -1,6 +1,6 @@
 # MCP tool reference
 
-Engineering Bridge v0.2.0-alpha.1 exposes exactly five local STDIO MCP tools.
+Engineering Bridge v0.2.0-alpha.2 exposes exactly five local STDIO MCP tools.
 
 ## `run_task`
 

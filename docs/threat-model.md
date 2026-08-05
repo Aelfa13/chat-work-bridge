@@ -1,6 +1,6 @@
 # Threat model
 
-Engineering Bridge v0.2.0-alpha.1 assumes one trusted local operator controls the startup configuration and local MCP client. It is not designed for untrusted remote callers.
+Engineering Bridge v0.2.0-alpha.2 assumes one trusted local operator controls the startup configuration and local MCP client. It is not designed for untrusted remote callers.
 
 | Risk | Current control | Remaining responsibility or limit |
 |---|---|---|

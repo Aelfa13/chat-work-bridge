@@ -1,4 +1,4 @@
-# Engineering Bridge v0.2.0-alpha.1
+# Engineering Bridge v0.2.0-alpha.2
 
 Engineering Bridge lets a compatible AI chat client ask the Codex CLI on your computer to inspect a registered code workspace. The chat client understands your request, Codex reads the code locally, and the Bridge connects them. Workspaces are read-only by default; an enabled write follows a review-first flow that generates a patch proposal and applies it only after exact `APPLY` confirmation.
 
