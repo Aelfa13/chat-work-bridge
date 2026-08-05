@@ -4,6 +4,14 @@ Engineering Bridge lets a compatible AI chat client ask the Codex CLI on your co
 
 This is alpha software for trusted local use. [简体中文](README.zh-CN.md)
 
+User describes a goal in an AI chat
+-> Engineering Bridge passes the task
+-> local Codex inspects or proposes a patch
+-> the result returns to the chat
+
+Before: You had to copy and paste context and results between the chat and Codex.
+Now: You describe the goal to a compatible chat client that can start the local Bridge.
+
 ## Why a bridge is needed
 
 A normal web chat usually cannot see files on your computer or start your local Codex CLI. Engineering Bridge provides a local, pre-registered and scope-limited entry point. It does not make every ChatGPT or Claude conversation local-tool capable: the client must support launching a local STDIO MCP server.
@@ -18,6 +26,10 @@ A normal web chat usually cannot see files on your computer or start your local 
 ## Who can use it
 
 You can use this release when your AI client can configure and start a local STDIO MCP server, and your computer has Node.js, Git, and an authenticated Codex CLI. A browser-only chat that cannot configure local tools cannot use Engineering Bridge directly. Client configuration formats differ, so the generic fields below must be translated into the format documented by your client.
+
+## Verified compatibility
+
+Maintainer testing has verified read-only and controlled-write operation on macOS with a local chat client capable of starting a STDIO MCP server and an authenticated Codex CLI. Other clients and operating systems have not yet been verified by the maintainer; compatibility should not be inferred.
 
 ## What it can do today
 
@@ -130,6 +142,14 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 ```
 
 The process waits for MCP messages on standard input; it is not an interactive shell and does not automatically connect itself to a chat client.
+
+## Troubleshooting
+
+- **The five tools are not visible:** restart or reconnect the client integration, then check that its local STDIO MCP configuration starts `dist/src/mcp-stdio.js` and exposes the five tools listed above.
+- **The client process cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Configure the client with a path that includes both executables, as in the generic configuration above.
+- **`workspaces.json` or path errors:** use absolute paths for both the server script and `workspaces.json`, and an absolute, normalized workspace `root`; confirm the selected workspace ID exists.
+- **A controlled write is refused:** confirm the configured root is the Git top-level, an initial commit/HEAD exists, `allow_write` is `true`, and the tracked worktree and index are clean. Use `git -C /absolute/path/to/my-project status --short` to inspect state.
+- **A manual start appears to hang:** this is expected; Bridge is waiting for MCP STDIO messages and is not an interactive shell.
 
 ## Your first controlled write
 

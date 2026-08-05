@@ -4,6 +4,14 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
 
 这是供可信本机环境试用的 alpha 软件。[English](README.md)
 
+用户在 AI 聊天中说明目标
+-> Engineering Bridge 传递任务
+-> 本机 Codex 检查代码或提出补丁
+-> 结果返回聊天
+
+以前：需要在聊天与 Codex 之间来回复制粘贴上下文和结果。
+现在：只需向能够启动本机 Bridge 的兼容聊天客户端说明目标。
+
 ## 为什么需要这座桥
 
 普通网页聊天通常看不到你电脑里的文件，也不能直接启动本机 Codex CLI。Engineering Bridge 提供一个预先登记、范围受限的本机入口。它不会让所有 ChatGPT 或 Claude 对话自动获得本地工具能力；客户端必须支持启动本地 STDIO MCP 服务。
@@ -18,6 +26,10 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
 ## 谁能使用
 
 只有当 AI 客户端能够配置并启动本地 STDIO MCP 服务，同时电脑上具备 Node.js、Git 和已认证的 Codex CLI 时，才能使用本版本。仅有不支持本地工具的网页聊天时，不能直接使用。不同客户端的配置格式不同，下面给出的是通用字段，需按具体客户端文档转换。
+
+## 已验证兼容性
+
+维护者已在 macOS 上实测：使用能够启动本地 STDIO MCP 服务的聊天客户端和已认证的 Codex CLI，只读与受控写入均可运行。其他客户端和操作系统尚未由维护者验证，不应据此推断兼容。
 
 ## 当前能做什么
 
@@ -130,6 +142,14 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 ```
 
 该进程会等待标准输入中的 MCP 消息；它不是交互式 shell，也不会自动连接到聊天客户端。
+
+## 常见故障排查
+
+- **看不到五个工具：**重启或重新连接客户端集成，并检查其本地 STDIO MCP 配置是否启动 `dist/src/mcp-stdio.js`、是否暴露上文列出的五个工具。
+- **客户端进程找不到 `node` 或 `codex`：**客户端启动的进程可能使用不同于终端的 `PATH`；请按上面的通用配置，让客户端使用同时包含这两个可执行文件的路径。
+- **`workspaces.json` 或路径报错：**服务脚本和 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并确认所选工作区 ID 已登记。
+- **受控写入被拒绝：**确认配置根目录是 Git 顶层、已有初始 commit/HEAD、`allow_write` 为 `true`，且 tracked 工作树和 index 均干净。可用 `git -C /absolute/path/to/my-project status --short` 检查状态。
+- **手动启动后终端看似卡住：**这是正常现象；Bridge 正在等待 MCP STDIO 消息，并不是交互式 shell。
 
 ## 第一次受控写入体验
 
