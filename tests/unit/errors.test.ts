@@ -15,22 +15,22 @@ test("exposes the Codex error codes", () => {
     "CODEX_EXECUTION_FAILED"
   ]);
   assert.deepEqual(serializeError(new CoreError("CODEX_UNAVAILABLE")), {
-    code: "CODEX_UNAVAILABLE", message: "Codex is unavailable.", retryable: false
+    code: "CODEX_UNAVAILABLE", message: "Codex is unavailable."
   });
   assert.deepEqual(serializeError(new CoreError("CODEX_PROTOCOL_ERROR")), {
-    code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response.", retryable: false
+    code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response."
   });
   assert.deepEqual(serializeError(new CoreError("CODEX_EXECUTION_FAILED")), {
-    code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed.", retryable: false
+    code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed."
   });
   assert.deepEqual(serializeError(new CoreError("UNKNOWN_WORKSPACE")), {
-    code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered.", retryable: false
+    code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered."
   });
   assert.deepEqual(serializeError(new CoreError("WORKSPACE_BOUNDARY_VIOLATION")), {
-    code: "WORKSPACE_BOUNDARY_VIOLATION", message: "The workspace boundary could not be verified.", retryable: false
+    code: "WORKSPACE_BOUNDARY_VIOLATION", message: "The workspace boundary could not be verified."
   });
   assert.deepEqual(serializeError(new CoreError("WORKSPACE_PRECONDITION_FAILED")), {
-    code: "WORKSPACE_PRECONDITION_FAILED", message: "The workspace preconditions were not met.", retryable: false
+    code: "WORKSPACE_PRECONDITION_FAILED", message: "The workspace preconditions were not met."
   });
 });
 
@@ -39,8 +39,7 @@ test("serializeError exposes an allowlisted core error", () => {
 
   assert.deepEqual(serialized, {
     code: "INVALID_STATE_TRANSITION",
-    message: "The requested state transition is not allowed.",
-    retryable: false
+    message: "The requested state transition is not allowed."
   });
 });
 
@@ -60,8 +59,7 @@ test("serializeError ignores mutated CoreError details", () => {
 
   assert.deepEqual(serialized, {
     code: "INVALID_STATE_TRANSITION",
-    message: "The requested state transition is not allowed.",
-    retryable: false
+    message: "The requested state transition is not allowed."
   });
   for (const marker of secretMarkers) {
     assert.equal(json.includes(marker), false);
@@ -83,8 +81,7 @@ test("serializeError removes details from unknown errors and values", () => {
 
     assert.deepEqual(serialized, {
       code: "INTERNAL_ERROR",
-      message: "The request could not be completed.",
-      retryable: false
+      message: "The request could not be completed."
     });
     for (const marker of secretMarkers) {
       assert.equal(json.includes(marker), false);

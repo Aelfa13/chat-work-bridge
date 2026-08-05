@@ -60,6 +60,15 @@ index 90be1f3..3b18e51 100644
 +after
 `;
 
+const additionPatch = `diff --git a/added.txt b/added.txt
+new file mode 100644
+index 0000000..3e75765
+--- /dev/null
++++ b/added.txt
+@@ -0,0 +1 @@
++added
+`;
+
 test("generation records base metadata, binds the task, and keeps Codex instruction read-only", async () => {
   const root = repository();
   let instruction = "";
@@ -153,6 +162,79 @@ test("stores and applies a controlled patch normalized to one trailing LF", asyn
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
 });
 
+test("adds an absent 100644 text file", async () => {
+  const root = repository();
+  const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: additionPatch }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "add file" });
+  await terminal(tasks, generated.taskId);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["added.txt"]);
+  assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+});
+
+test("applies a mixed modification and 100644 text addition", async () => {
+  const root = repository();
+  const mixedPatch = `${validPatch}${additionPatch}`;
+  const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: mixedPatch }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change and add" });
+  await terminal(tasks, generated.taskId);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["note.txt", "added.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+  assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+});
+
+test("rejects addition targets already present in base HEAD, the worktree, or the index", async () => {
+  for (const state of ["tracked", "untracked", "index"] as const) {
+    const root = repository();
+    const path = state === "tracked" ? "note.txt" : "added.txt";
+    const patch = additionPatch.replaceAll("added.txt", path);
+    if (state === "untracked") writeFileSync(join(root, path), "collision\n");
+    const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: patch }));
+    const generated = await controlled.generate({ workspace_id: "workspace", change_request: "add file" });
+    await terminal(tasks, generated.taskId);
+    if (state === "index") {
+      writeFileSync(join(root, path), "indexed\n");
+      git(root, "add", path);
+    }
+    await expectCode(
+      () => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  }
+});
+
+test("rejects unsafe or structurally invalid additions", async () => {
+  const invalidPatches = [
+    additionPatch.replace("new file mode 100644", "new file mode 100755"),
+    additionPatch.replace("new file mode 100644", "new file mode 120000"),
+    additionPatch.replace("new file mode 100644", "new file mode 160000"),
+    additionPatch.replace("index 0000000..3e75765", "GIT binary patch\nliteral 0\nHcmV?d00001"),
+    additionPatch.replace("new file mode 100644", "deleted file mode 100644").replace("--- /dev/null", "--- a/added.txt").replace("+++ b/added.txt", "+++ /dev/null"),
+    additionPatch.replace("new file mode 100644", "similarity index 100%\nrename from old.txt\nrename to added.txt"),
+    additionPatch.replace("new file mode 100644", "similarity index 100%\ncopy from old.txt\ncopy to added.txt"),
+    `${additionPatch}${additionPatch}`,
+    additionPatch.replace("diff --git a/added.txt b/added.txt", "diff --git added.txt added.txt"),
+    additionPatch.replace("+++ b/added.txt", "+++ b/other.txt"),
+    additionPatch.replaceAll("added.txt", "../added.txt")
+  ];
+
+  for (const output of invalidPatches) {
+    const root = repository();
+    const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output }));
+    const generated = await controlled.generate({ workspace_id: "workspace", change_request: "add file" });
+    await terminal(tasks, generated.taskId);
+    await expectCode(
+      () => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  }
+});
+
 test("collapses extra trailing LFs in controlled patch results", async () => {
   const root = repository();
   const { controlled, tasks } = fixture(root, async () => ({
@@ -178,7 +260,7 @@ test("requires exact confirmation and a successfully completed generation task",
   const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change" });
   await expectCode(() => controlled.apply({ patch_task_id: generated.taskId, confirmation: "apply" }), "INVALID_STATE_TRANSITION");
   await expectCode(() => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }), "INVALID_STATE_TRANSITION");
-  finish({ kind: "failed", error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed.", retryable: false } });
+  finish({ kind: "failed", error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." } });
   await terminal(tasks, generated.taskId);
   await expectCode(() => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }), "INVALID_STATE_TRANSITION");
 });

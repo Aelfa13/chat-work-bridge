@@ -81,8 +81,7 @@ test("applies a completed-output transform exactly once before storing the resul
 test("records executor failures", async () => {
   const error: SerializedError = {
     code: "CODEX_EXECUTION_FAILED",
-    message: "Codex execution failed.",
-    retryable: false
+    message: "Codex execution failed."
   };
   const executor: Executor = { execute: async () => ({ kind: "failed", error }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
@@ -111,8 +110,7 @@ test("records an unknown workspace asynchronously without creating an executor",
     state: "failed",
     error: {
       code: "UNKNOWN_WORKSPACE",
-      message: "The requested workspace is not registered.",
-      retryable: false
+      message: "The requested workspace is not registered."
     }
   });
 });

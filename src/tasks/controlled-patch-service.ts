@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
-import { realpath } from "node:fs/promises";
+import { lstat, realpath } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
@@ -22,7 +22,7 @@ type Proposal = {
 };
 
 const PATCH_INSTRUCTION = (changeRequest: string): string => `You are preparing a proposed change for human review. The workspace is read-only.
-Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, file additions or deletions, renames or copies, mode changes, or symlink changes. Modify existing tracked text files only.
+Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.
 
 Change request:
 ${changeRequest}`;
@@ -71,17 +71,21 @@ export class ControlledPatchService {
     try {
       const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
       if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-      const changedPaths = parsePatch(result.output);
-      for (const path of changedPaths) {
-        const entry = await this.git(proposal.workspaceRoot, ["ls-tree", proposal.baseHead, "--", path]);
-        if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) {
-          throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      const targets = parsePatch(result.output);
+      for (const target of targets) {
+        const entry = await this.git(proposal.workspaceRoot, ["ls-tree", proposal.baseHead, "--", target.path]);
+        if (target.kind === "modified") {
+          if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) failPatch();
+          continue;
         }
+        if (entry.length !== 0) failPatch();
+        const indexEntry = await this.git(proposal.workspaceRoot, ["ls-files", "--stage", "--", target.path]);
+        if (indexEntry.length !== 0 || await pathExists(resolve(proposal.workspaceRoot, target.path))) failPatch();
       }
       await this.git(proposal.workspaceRoot, ["apply", "--check"], result.output);
       await this.git(proposal.workspaceRoot, ["apply"], result.output);
       proposal.state = "applied";
-      return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: changedPaths };
+      return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
     } catch (error) {
       proposal.state = "proposed";
       throw error;
@@ -135,32 +139,56 @@ function normalizeTrailingLf(output: string): string {
   return `${output.replace(/\n*$/u, "")}\n`;
 }
 
-function parsePatch(patch: string): string[] {
+type PatchTarget = { path: string; kind: "modified" | "added" };
+
+function parsePatch(patch: string): PatchTarget[] {
   if (!patch.startsWith("diff --git ") || patch.includes("```") || patch.includes("GIT binary patch") ||
-      patch.includes("Binary files ") || /^(old mode|new mode|new file mode|deleted file mode|similarity index|rename (from|to)|copy (from|to)) /mu.test(patch)) {
+      patch.includes("Binary files ") || /^(old mode|new mode|deleted file mode|similarity index|rename (from|to)|copy (from|to)) /mu.test(patch)) {
     throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
   }
   const lines = patch.split("\n");
-  const paths: string[] = [];
+  const targets: PatchTarget[] = [];
   let index = 0;
-  while (index < lines.length && lines[index] !== undefined) {
+  while (index < lines.length && lines[index] !== "") {
     const header = lines[index];
-    if (header === undefined || !header.startsWith("diff --git ")) {
-      index += 1;
-      continue;
-    }
+    if (header === undefined || !header.startsWith("diff --git ")) failPatch();
     const match = /^diff --git a\/(\S+) b\/(\S+)$/u.exec(header);
     if (match === null || match[1] !== match[2] || !safePath(match[1]!)) failPatch();
     const path = match[1]!;
-    paths.push(path);
     index += 1;
+    const start = index;
     while (index < lines.length && !lines[index]!.startsWith("diff --git ")) index += 1;
+    const section = lines.slice(start, index).join("\n");
+    const newFileModes = section.match(/^new file mode .*$/gmu) ?? [];
+    const oldHeaders = section.match(/^--- .*$/gmu) ?? [];
+    const newHeaders = section.match(/^\+\+\+ .*$/gmu) ?? [];
+    const addition = newFileModes.length > 0;
+    if (addition) {
+      if (newFileModes.length !== 1 || newFileModes[0] !== "new file mode 100644" ||
+          !section.startsWith("new file mode 100644\n") ||
+          oldHeaders.length !== 1 || oldHeaders[0] !== "--- /dev/null" ||
+          newHeaders.length !== 1 || newHeaders[0] !== `+++ b/${path}` ||
+          !section.includes(`--- /dev/null\n+++ b/${path}\n`)) failPatch();
+    } else if (oldHeaders.length !== 1 || oldHeaders[0] !== `--- a/${path}` ||
+               newHeaders.length !== 1 || newHeaders[0] !== `+++ b/${path}` ||
+               !section.includes(`--- a/${path}\n+++ b/${path}\n`)) {
+      failPatch();
+    }
+    if (!/^@@ /mu.test(section)) failPatch();
+    targets.push({ path, kind: addition ? "added" : "modified" });
   }
-  if (paths.length === 0 || new Set(paths).size !== paths.length) failPatch();
-  for (const path of paths) {
-    if (!patch.includes(`--- a/${path}\n+++ b/${path}\n`) || !patch.includes("@@ ")) failPatch();
+  if (targets.length === 0 || new Set(targets.map(({ path }) => path)).size !== targets.length) failPatch();
+  return targets;
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await lstat(path);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    failPatch();
   }
-  return paths;
 }
 
 function safePath(path: string): boolean {

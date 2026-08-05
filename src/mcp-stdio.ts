@@ -44,7 +44,7 @@ async function main(): Promise<void> {
     (workspaceRoot) => new CodexExecutor(workspaceRoot)
   );
   const controlledPatches = new ControlledPatchService(registry, service);
-  const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.2" });
+  const server = new McpServer({ name: "engineering-bridge", version: "0.2.0-alpha.3" });
 
   server.registerTool("run_task", {
     description: "Run a read-only Codex task in a pre-registered workspace. This tool does not modify workspace files.",
@@ -55,16 +55,6 @@ async function main(): Promise<void> {
   }, ({ workspace_id, instruction }) => {
     const { taskId } = service.runTask({ workspace_id, instruction });
     return jsonContent({ task_id: taskId });
-  });
-
-  server.registerTool("task_status", {
-    description: "Check the current state of a task. This tool is read-only.",
-    inputSchema: { task_id: z.string() }
-  }, ({ task_id }) => {
-    const status = service.status(task_id);
-    return status === undefined
-      ? unknownTask()
-      : jsonContent({ task_id: status.taskId, state: status.state });
   });
 
   server.registerTool("task_result", {
@@ -96,7 +86,7 @@ async function main(): Promise<void> {
   });
 
   server.registerTool("apply_controlled_patch", {
-    description: "Apply one reviewed patch proposal after exact APPLY confirmation. This tool can modify validated tracked text files but never stages, commits, or pushes.",
+    description: "Apply one reviewed patch proposal after exact APPLY confirmation. This tool can modify validated tracked text files or add absent 100644 text files, but never stages, commits, or pushes.",
     inputSchema: {
       patch_task_id: z.string().min(1),
       confirmation: z.literal("APPLY")

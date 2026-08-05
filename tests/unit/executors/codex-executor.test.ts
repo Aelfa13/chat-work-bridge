@@ -112,7 +112,7 @@ test("maps a thrown spawn and a process error to unavailable", async () => {
   for (const result of [thrown, emitted]) {
     assert.deepEqual(result, {
       kind: "failed",
-      error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable.", retryable: false }
+      error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable." }
     });
   }
 });
@@ -128,7 +128,7 @@ test("rejects malformed JSONL, missing messages, and malformed message structure
       .execute({ taskId: TASK_ID, instruction: "x" });
     assert.deepEqual(result, {
       kind: "failed",
-      error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response.", retryable: false }
+      error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
     });
     assert.equal(JSON.stringify(result).includes("secret raw line"), false);
   }
@@ -143,7 +143,7 @@ test("nonzero exit discards partial output and stderr details", async () => {
 
   assert.deepEqual(result, {
     kind: "failed",
-    error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed.", retryable: false }
+    error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
   });
   const serialized = JSON.stringify(result);
   assert.equal(serialized.includes("secret partial"), false);

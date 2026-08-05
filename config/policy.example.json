@@ -1,7 +1,0 @@
-{
-  "bindHost": "127.0.0.1",
-  "targetWorkspaceMode": "read_only",
-  "allowArbitraryShell": false,
-  "allowCallerWorkspaceRegistration": false,
-  "persistRawExecutorOutput": false
-}

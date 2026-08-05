@@ -1,4 +1,4 @@
-# Engineering Bridge v0.2.0-alpha.2
+# Engineering Bridge v0.2.0-alpha.3
 
 Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Codex CLI 检查已登记的代码工作区：聊天客户端理解你的要求，Codex 在本机读取代码，Bridge 负责连接两者。工作区默认只读；启用受控写入后，也必须先生成补丁提案（patch proposal）供审阅，只有精确确认 `APPLY` 才会应用。
 
@@ -48,7 +48,7 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
 
 ### 受控写入：先展示差异，再确认修改
 
-写入默认关闭。要使用受控写入，工作区必须显式设置 `allow_write: true`，配置根目录必须是 Git 顶层，必须已有 HEAD commit，且 tracked 工作树和 index 都是干净的。提案只能修改已有、已跟踪的普通文本文件；新增、删除、重命名、复制、二进制补丁、mode 变化、符号链接变化和危险补丁路径都会被拒绝。
+写入默认关闭。要使用受控写入，工作区必须显式设置 `allow_write: true`，配置根目录必须是 Git 顶层，必须已有 HEAD commit，且 tracked 工作树和 index 都是干净的。提案可以修改已有、已跟踪的普通文本文件，也可以用 100644 mode 新增目标尚不存在的普通文本文件。删除、重命名、复制、二进制补丁、mode 变化、可执行文件新增、符号链接、submodule、危险补丁路径，以及目标已存在于 HEAD、index 或工作树中的新增都会被拒绝。
 
 应用前，Bridge 会重新检查仓库根目录、HEAD、工作树和补丁。它不会自动测试、暂存、提交或推送。
 
@@ -74,13 +74,11 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
    cd engineering-bridge
    ```
 
-2. 安装、检查并构建：
+2. 安装并构建：
 
    ```sh
    npm install
-   npm run typecheck
    npm run build
-   npm test
    ```
 
 3. 创建 `workspaces.json`，填写项目的绝对、规范化路径：
@@ -113,10 +111,9 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
 
    请使用绝对路径。如果客户端已经提供包含 Node.js 和 Codex 的 `PATH`，可以不覆盖 `env`。不要把一种客户端的配置格式直接套到另一种客户端。
 
-5. 启动或重新连接客户端集成，确认能看到以下 5 个工具：
+5. 启动或重新连接客户端集成，确认能看到以下 4 个工具：
 
    - `run_task`
-   - `task_status`
    - `task_result`
    - `generate_controlled_patch`
    - `apply_controlled_patch`
@@ -125,7 +122,7 @@ Engineering Bridge 让兼容的 AI 聊天客户端能够请求你电脑上的 Co
 
    > 在工作区 `my-project` 中列出顶层文件；如果存在 Git HEAD，也报告其准确值。不要修改任何内容。
 
-7. 成功时会先返回 task ID，状态经过轮询后产生确实来自项目的回答。用以下命令确认没有修改：
+7. 成功时会先返回 task ID。轮询 `task_result`：排队或运行中会返回 `ready: false`，之后返回完成结果或安全错误。用以下命令确认没有修改：
 
    ```sh
    git -C /absolute/path/to/my-project status --short
@@ -145,7 +142,7 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 常见故障排查
 
-- **看不到五个工具：**重启或重新连接客户端集成，并检查其本地 STDIO MCP 配置是否启动 `dist/src/mcp-stdio.js`、是否暴露上文列出的五个工具。
+- **看不到四个工具：**重启或重新连接客户端集成，并检查其本地 STDIO MCP 配置是否启动 `dist/src/mcp-stdio.js`、是否暴露上文列出的四个工具。
 - **客户端进程找不到 `node` 或 `codex`：**客户端启动的进程可能使用不同于终端的 `PATH`；请按上面的通用配置，让客户端使用同时包含这两个可执行文件的路径。
 - **`workspaces.json` 或路径报错：**服务脚本和 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并确认所选工作区 ID 已登记。
 - **受控写入被拒绝：**确认配置根目录是 Git 顶层、已有初始 commit/HEAD、`allow_write` 为 `true`，且 tracked 工作树和 index 均干净。可用 `git -C /absolute/path/to/my-project status --short` 检查状态。
@@ -178,6 +175,8 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
    ```
 
 7. 自行运行项目测试，再决定是否暂存、提交和推送。Bridge 不会执行这些操作。
+
+其他位置的 untracked 文件本身不会破坏 tracked state 干净这一要求；但提案中的新增文件目标必须同时不存在于工作树和 index。
 
 ## 当前限制
 

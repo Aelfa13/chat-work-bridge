@@ -1,4 +1,4 @@
-# Engineering Bridge v0.2.0-alpha.2
+# Engineering Bridge v0.2.0-alpha.3
 
 Engineering Bridge lets a compatible AI chat client ask the Codex CLI on your computer to inspect a registered code workspace. The chat client understands your request, Codex reads the code locally, and the Bridge connects them. Workspaces are read-only by default; an enabled write follows a review-first flow that generates a patch proposal and applies it only after exact `APPLY` confirmation.
 
@@ -48,7 +48,7 @@ Every registered workspace can run read-only tasks. Bridge launches Codex with a
 
 ### Controlled write: show the change first
 
-Controlled writes are off by default. They require `allow_write: true`, a clean Git worktree whose configured root is the repository top-level, and an existing HEAD commit. A proposal may modify only existing tracked regular text files. Bridge rejects additions, deletions, renames, copies, binary patches, mode changes, symlink changes, and unsafe patch paths.
+Controlled writes are off by default. They require `allow_write: true`, a Git workspace whose tracked worktree and index are clean, whose configured root is the repository top-level, and which has an existing HEAD commit. A proposal may modify existing tracked regular text files or add absent ordinary text files with mode 100644. Bridge rejects deletions, renames, copies, binary patches, mode changes, executable additions, symlinks, submodules, unsafe patch paths, and additions whose target already exists in HEAD, the index, or the worktree.
 
 Before applying, Bridge rechecks the repository root, HEAD, clean tracked state, and patch. It never automatically tests, stages, commits, or pushes.
 
@@ -74,13 +74,11 @@ For controlled writes, the project must additionally be a clean Git top-level wi
    cd engineering-bridge
    ```
 
-2. Install, check, and build:
+2. Install and build:
 
    ```sh
    npm install
-   npm run typecheck
    npm run build
-   npm test
    ```
 
 3. Create `workspaces.json` with an absolute, normalized project path:
@@ -113,10 +111,9 @@ For controlled writes, the project must additionally be a clean Git top-level wi
 
    Use absolute paths. If the client already provides a suitable `PATH`, an `env` override may not be needed. Do not copy a configuration format into a client that uses a different schema.
 
-5. Start or reconnect the client integration. Confirm that these five tools are visible:
+5. Start or reconnect the client integration. Confirm that these four tools are visible:
 
    - `run_task`
-   - `task_status`
    - `task_result`
    - `generate_controlled_patch`
    - `apply_controlled_patch`
@@ -125,7 +122,7 @@ For controlled writes, the project must additionally be a clean Git top-level wi
 
    > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
 
-7. A successful run returns a task ID, progresses through status polling, and produces an answer based on your project. Confirm no change with:
+7. A successful run returns a task ID. Poll `task_result`: it returns `ready: false` while queued or running, then completed output or a safe error. Confirm no change with:
 
    ```sh
    git -C /absolute/path/to/my-project status --short
@@ -145,7 +142,7 @@ The process waits for MCP messages on standard input; it is not an interactive s
 
 ## Troubleshooting
 
-- **The five tools are not visible:** restart or reconnect the client integration, then check that its local STDIO MCP configuration starts `dist/src/mcp-stdio.js` and exposes the five tools listed above.
+- **The four tools are not visible:** restart or reconnect the client integration, then check that its local STDIO MCP configuration starts `dist/src/mcp-stdio.js` and exposes the four tools listed above.
 - **The client process cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Configure the client with a path that includes both executables, as in the generic configuration above.
 - **`workspaces.json` or path errors:** use absolute paths for both the server script and `workspaces.json`, and an absolute, normalized workspace `root`; confirm the selected workspace ID exists.
 - **A controlled write is refused:** confirm the configured root is the Git top-level, an initial commit/HEAD exists, `allow_write` is `true`, and the tracked worktree and index are clean. Use `git -C /absolute/path/to/my-project status --short` to inspect state.
@@ -178,6 +175,8 @@ The process waits for MCP messages on standard input; it is not an interactive s
    ```
 
 7. Run the project's tests and decide whether to stage, commit, and push. Bridge does none of those operations.
+
+Untracked files elsewhere do not by themselves violate the clean tracked-state requirement. However, a proposed new-file target must be absent from both the worktree and index.
 
 ## Current limits
 
