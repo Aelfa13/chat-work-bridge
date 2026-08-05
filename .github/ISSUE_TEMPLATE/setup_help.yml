@@ -1,0 +1,56 @@
+name: Setup help
+description: Get help with installation, configuration, connection, or first run
+title: ""
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: Please read the README before requesting setup help.
+
+  - type: textarea
+    id: blocked_step
+    attributes:
+      label: Where are you stuck?
+      description: Describe the installation, configuration, connection, or first-run step where you need help.
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What have you tried?
+      description: Describe the actions you have already taken.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: "e.g. macOS 15, Ubuntu 24.04, Windows 11"
+    validations:
+      required: true
+
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js version
+      placeholder: "e.g. 22.14.0"
+    validations:
+      required: true
+
+  - type: input
+    id: bridge_version
+    attributes:
+      label: Bridge version
+      placeholder: "e.g. 1.0.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error message or logs
+      description: Remove tokens, passwords, keys, and personal information before sharing.
+      render: shell
+      placeholder: Paste the error message or relevant logs here.
