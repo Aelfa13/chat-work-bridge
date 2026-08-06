@@ -1,172 +1,146 @@
-# Engineering Bridge v0.2.0-alpha.3
+# Engineering Bridge
 
-Engineering Bridge lets a compatible AI chat client ask the Codex CLI on your computer to inspect a registered code workspace. The chat client understands your request, Codex reads the code locally, and the Bridge connects them. Workspaces are read-only by default; an enabled write follows a review-first flow that generates a patch proposal and applies it only after exact `APPLY` confirmation.
+**Turn chat into an engineering console and local Codex into the executor: see the patch first, then decide whether it may be written.**
 
-This is alpha software for trusted local use. [简体中文](README.zh-CN.md)
+[![Release v0.2.0-alpha.3](https://img.shields.io/badge/release-v0.2.0--alpha.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v0.2.0-alpha.3)
+[![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-User describes a goal in an AI chat
--> Engineering Bridge passes the task
--> local Codex inspects or proposes a patch
--> the result returns to the chat
+[简体中文](README.zh-CN.md) · **Alpha for trusted local use:** maintainer-tested on macOS with a local chat client that can launch a STDIO MCP server and an authenticated Codex CLI. Other clients and operating systems are not yet verified.
 
-Before: You had to copy and paste context and results between the chat and Codex.
-Now: You describe the goal to a compatible chat client that can start the local Bridge.
+## Before / now
 
-## Why a bridge is needed
+**Before:** copy project context from ChatGPT to a terminal or Codex, then carry commands, diffs, and results back—repeatedly.
 
-A normal web chat usually cannot see files on your computer or start your local Codex CLI. Engineering Bridge provides a local, pre-registered and scope-limited entry point. It does not make every ChatGPT or Claude conversation local-tool capable: the client must support launching a local STDIO MCP server.
+**Now:** describe the engineering goal in a compatible chat client. Engineering Bridge selects a pre-registered local workspace, asks local Codex to inspect it or prepare a patch, and returns the result to the conversation. You review the full diff and retain the decision to write.
 
-## The four roles
+A normal browser chat cannot inherently access projects on your computer or launch Codex CLI. The client must support starting a locally configured STDIO MCP server.
 
-- **ChatGPT, Claude, or another MCP client** understands your request, calls Bridge tools, and shows their results. Compatibility depends on support for locally configured STDIO MCP servers.
-- **Engineering Bridge** maps a caller-visible workspace ID to a path configured by a trusted local operator, starts Codex with fixed read-only settings, tracks tasks in memory, and validates controlled patches.
-- **Codex CLI** runs on your computer, reads the registered workspace, and returns analysis or a proposed Git diff. It must already be installed and authenticated.
-- **MCP over STDIO** is the local protocol and process connection between the client and Bridge. The client starts Bridge and exchanges messages through standard input and output; there is no HTTP service.
-
-## Who can use it
-
-You can use this release when your AI client can configure and start a local STDIO MCP server, and your computer has Node.js, Git, and an authenticated Codex CLI. A browser-only chat that cannot configure local tools cannot use Engineering Bridge directly. Client configuration formats differ, so the generic fields below must be translated into the format documented by your client.
-
-## Verified compatibility
-
-Maintainer testing has verified read-only and controlled-write operation on macOS with a local chat client capable of starting a STDIO MCP server and an authenticated Codex CLI. Other clients and operating systems have not yet been verified by the maintainer; compatibility should not be inferred.
-
-## What it can do today
-
-- Read-only analysis: “Summarize the important files in this workspace without changing anything.”
-- Code location: “Find where authentication is implemented and explain the flow.”
-- Review: “Review the current code for reliability risks without editing files.”
-- Controlled write: “Prepare a proposal that changes the timeout message in `src/client.ts`; show me the diff before applying it.”
-
-For a controlled write, Bridge first returns a patch proposal and recorded base HEAD. Only exact `APPLY` can apply a validated proposal. You remain responsible for reviewing the whole diff and then running tests, staging, committing, and pushing if appropriate.
-
-## Two modes
-
-### Read-only: inspect without changing
-
-Every registered workspace can run read-only tasks. Bridge launches Codex with a read-only sandbox, approval set to `never`, an ephemeral session, and network access disabled.
-
-### Controlled write: show the change first
-
-Controlled writes are off by default. They require `allow_write: true`, a Git workspace whose tracked worktree and index are clean, whose configured root is the repository top-level, and which has an existing HEAD commit. A proposal may modify existing tracked regular text files or add absent ordinary text files with mode 100644. Bridge rejects deletions, renames, copies, binary patches, mode changes, executable additions, symlinks, submodules, unsafe patch paths, and additions whose target already exists in HEAD, the index, or the worktree.
-
-Before applying, Bridge rechecks the repository root, HEAD, clean tracked state, and patch. It never automatically tests, stages, commits, or pushes.
-
-## Before your first run
-
-You need:
-
-- Node.js 22 or newer;
-- Git;
-- an installed and authenticated `codex` CLI available on `PATH`;
-- a local project directory;
-- an MCP client that can start a local STDIO server;
-- basic terminal familiarity.
-
-For controlled writes, the project must additionally be a clean Git top-level with an initial commit, and its registration must explicitly contain `"allow_write": true`.
-
-## Your first successful read-only run
-
-1. Get the repository and enter it:
-
-   ```sh
-   git clone https://github.com/wudy29/engineering-bridge.git
-   cd engineering-bridge
-   ```
-
-2. Install and build:
-
-   ```sh
-   npm install
-   npm run build
-   ```
-
-3. Create `workspaces.json` with an absolute, normalized project path:
-
-   ```json
-   [
-     {
-       "id": "my-project",
-       "root": "/absolute/path/to/my-project"
-     }
-   ]
-   ```
-
-   The configuration is trusted local input. MCP callers select an ID but cannot register or replace paths. On macOS, `/tmp` aliases such as `/private/tmp` are compared by their real filesystem path for controlled-write Git-root checks.
-
-4. Configure your MCP client to start the local server. The location and syntax of client configuration files differ; use your client's documentation. The generic fields are:
-
-   ```json
-   {
-     "command": "node",
-     "args": [
-       "/absolute/path/to/engineering-bridge/dist/src/mcp-stdio.js",
-       "/absolute/path/to/engineering-bridge/workspaces.json"
-     ],
-     "env": {
-       "PATH": "/path/that/includes/node-and-codex"
-     }
-   }
-   ```
-
-   Use absolute paths. If the client already provides a suitable `PATH`, an `env` override may not be needed. Do not copy a configuration format into a client that uses a different schema.
-
-5. Start or reconnect the client integration. Confirm that these four tools are visible:
-
-   - `run_task`
-   - `task_result`
-   - `generate_controlled_patch`
-   - `apply_controlled_patch`
-
-6. Ask a first question:
-
-   > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
-
-7. A successful run returns a task ID. Poll `task_result`: it returns `ready: false` while queued or running, then completed output or a safe error. Confirm no change with:
-
-   ```sh
-   git -C /absolute/path/to/my-project status --short
-   ```
-
-   For a clean Git project, no output means the worktree remains unchanged.
-
-You may also start Bridge manually for protocol diagnostics:
-
-```sh
-node dist/src/mcp-stdio.js /absolute/path/to/workspaces.json
-# or
-npm run mcp:stdio -- /absolute/path/to/workspaces.json
+```mermaid
+flowchart LR
+    A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
+    B --> C[Local Codex: read-only inspection or patch proposal]
+    C --> D[Result returns to Chat]
+    D --> E[Human reviews]
+    E -->|exact APPLY| F[Revalidate and write under controls]
 ```
 
-The process waits for MCP messages on standard input; it is not an interactive shell and does not automatically connect itself to a chat client.
+Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
 
-## Troubleshooting
+## Why control a local agent through chat?
 
-- **The four tools are not visible:** restart or reconnect the client integration, then check that its local STDIO MCP configuration starts `dist/src/mcp-stdio.js` and exposes the four tools listed above.
-- **The client process cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Configure the client with a path that includes both executables, as in the generic configuration above.
-- **`workspaces.json` or path errors:** use absolute paths for both the server script and `workspaces.json`, and an absolute, normalized workspace `root`; confirm the selected workspace ID exists.
-- **A controlled write is refused:** confirm the configured root is the Git top-level, an initial commit/HEAD exists, `allow_write` is `true`, and the tracked worktree and index are clean. Use `git -C /absolute/path/to/my-project status --short` to inspect state.
-- **A manual start appears to hang:** this is expected; Bridge is waiting for MCP STDIO messages and is not an interactive shell.
+- **The conversation continues.** Requirements, trade-offs, and earlier results remain part of planning instead of being manually ferried between ChatGPT, the terminal, and Codex.
+- **Memory can inform planning.** A client's global memory or an external memory system may contribute context, but memory is not built into Bridge.
+- **Planning and execution have distinct jobs.** Chat shapes the goal; local Codex inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
+- **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
+- **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
+- **Codex CLI is the current implementation.** Other CLI agents are a future, adapter-by-adapter direction—not current support. This release supports and has been tested only with Codex CLI.
 
-## Your first controlled write
+## A real project example
 
-1. Enable writes only for the intended Git workspace:
+This repository used Bridge to generate its CI workflow, Bug Report template, and Setup Help material. A human reviewed each proposal and explicitly used `APPLY`; the human then ran tests, committed, pushed, and created the Release. Remote CI passed. Bridge did **not** automatically publish anything.
 
-   ```json
-   [
-     {
-       "id": "my-project",
-       "root": "/absolute/path/to/my-project",
-       "allow_write": true
-     }
-   ]
-   ```
+## Capability map
 
-2. Make sure the configured root is the Git top-level and the tracked worktree and index are clean.
-3. Ask the client to call `generate_controlled_patch` with the workspace ID and a narrow change request.
-4. Wait for the proposal task to complete. Review every changed path, the complete diff, and the returned `base_head`. Nothing has been applied yet.
-5. Reject or revise an unexpected proposal. If it is correct, call `apply_controlled_patch` with its `patch_task_id` and confirmation exactly equal to `APPLY`.
-6. Inspect the result yourself:
+| Available today | Does not do today | Roadmap—not current support |
+| --- | --- | --- |
+| Read-only analysis, code location, and review in a pre-registered workspace | Cannot create or register a workspace automatically | Simplify workspace creation and registration |
+| Generate a complete Git patch before any write | Does not automatically test, stage, commit, push, or create a Release | Adapt other CLI agents one at a time |
+| Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation | No HTTP, UI, account system, caller authentication, or remote transport | Carefully explore multi-agent orchestration |
+| Modify tracked regular text files; add ordinary 100644 text files | No task cancellation or timeout; no persistence across restarts | These items are directions, not supported features |
+| Four local MCP tools over STDIO | Not OS-level read isolation | — |
+
+## Quick start
+
+### 1. Prepare
+
+You need Node.js 22+, Git, an installed and authenticated `codex` CLI available on `PATH`, a local project, an MCP client that can launch a local STDIO server, and basic terminal familiarity.
+
+For controlled writes, the project must also be a clean Git top-level with an initial commit/HEAD, and its registration must explicitly enable `allow_write`.
+
+### 2. Clone, install, and build
+
+```sh
+git clone https://github.com/wudy29/engineering-bridge.git
+cd engineering-bridge
+npm install
+npm run build
+```
+
+There is no one-click installer in this alpha.
+
+### 3. Register a workspace
+
+Create `workspaces.json` with an absolute, normalized project path:
+
+```json
+[
+  {
+    "id": "my-project",
+    "root": "/absolute/path/to/my-project"
+  }
+]
+```
+
+This file is trusted local configuration. MCP callers can select an ID but cannot create, register, or replace paths. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
+
+### 4. Configure a STDIO MCP client
+
+Client schemas and configuration locations differ; translate these generic fields using your client's documentation:
+
+```json
+{
+  "command": "node",
+  "args": [
+    "/absolute/path/to/engineering-bridge/dist/src/mcp-stdio.js",
+    "/absolute/path/to/engineering-bridge/workspaces.json"
+  ],
+  "env": {
+    "PATH": "/path/that/includes/node-and-codex"
+  }
+}
+```
+
+Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
+
+Reconnect the integration and confirm these four tools are visible:
+
+- `run_task`
+- `task_result`
+- `generate_controlled_patch`
+- `apply_controlled_patch`
+
+### 5. Run the first read-only task
+
+> In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
+
+A successful call returns a task ID. Poll `task_result`: it reports `ready: false` while queued or running, then returns output or a safe error. Verify the workspace yourself:
+
+```sh
+git -C /absolute/path/to/my-project status --short
+```
+
+For an initially clean Git project, no output means the worktree remains unchanged.
+
+### 6. Make the first controlled write
+
+Enable writing only for the intended workspace:
+
+```json
+[
+  {
+    "id": "my-project",
+    "root": "/absolute/path/to/my-project",
+    "allow_write": true
+  }
+]
+```
+
+1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
+2. Call `generate_controlled_patch` with the workspace ID and a narrow request.
+3. Wait for completion; review every path, the complete diff, and returned `base_head`. Nothing has been applied.
+4. Reject or revise anything unexpected. If correct, call `apply_controlled_patch` with its `patch_task_id` and confirmation exactly equal to `APPLY`.
+5. Inspect the result:
 
    ```sh
    git -C /absolute/path/to/my-project status --short
@@ -174,30 +148,46 @@ The process waits for MCP messages on standard input; it is not an interactive s
    git -C /absolute/path/to/my-project diff
    ```
 
-7. Run the project's tests and decide whether to stage, commit, and push. Bridge does none of those operations.
+6. Run the project's tests and decide whether to stage, commit, push, and release. Bridge performs none of them.
 
-Untracked files elsewhere do not by themselves violate the clean tracked-state requirement. However, a proposed new-file target must be absent from both the worktree and index.
+Untracked files elsewhere do not by themselves violate the clean tracked-state requirement, but any proposed new-file target must be absent from HEAD, the index, and the worktree.
 
-## Current limits
+For protocol diagnostics, you may start Bridge manually:
 
-- Running tasks cannot be cancelled and have no timeout.
-- Tasks, proposals, results, and logs are not persisted across a Bridge restart.
-- Read-only Codex execution does not provide OS-level filesystem read containment to the registered workspace. A same-user process may read other files that the OS permits.
-- Bridge never automatically tests, stages, commits, or pushes.
+```sh
+node dist/src/mcp-stdio.js /absolute/path/to/workspaces.json
+# or
+npm run mcp:stdio -- /absolute/path/to/workspaces.json
+```
+
+The process waits for MCP messages on standard input. It is not an interactive shell and does not connect itself to a chat client.
+
+## Safety boundary
+
+- Workspaces are read-only by default; controlled writing must be enabled per workspace with `allow_write: true`.
+- A proposal exposes the complete diff and its base HEAD. Only exact `APPLY` proceeds, after Bridge rechecks the Git top-level, HEAD, clean tracked worktree and index, and patch validity.
+- Accepted patches may modify existing tracked regular text files or add absent ordinary text files with mode 100644.
+- Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
+- Bridge never automatically tests, stages, commits, pushes, or creates a Release.
+- Running tasks cannot be cancelled and have no timeout. Tasks, proposals, results, and logs do not persist across restart.
+- Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
 - A human must review the complete proposal; a requested filename is not a code-enforced semantic allowlist.
-- There is no HTTP service, UI, account system, caller authentication, or remote transport.
 
-## More documentation
+Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), and [Tool reference](docs/tools.md). Also see [Architecture](docs/architecture.md), [Security policy](SECURITY.md), [Contributing](CONTRIBUTING.md), and [Release notes](RELEASE_NOTES.md).
 
-- [Architecture](docs/architecture.md)
-- [Security design](docs/security.md)
-- [Threat model](docs/threat-model.md)
-- [Tool reference](docs/tools.md)
-- [Security policy](SECURITY.md)
-- [Contributing](CONTRIBUTING.md)
-- [Release notes](RELEASE_NOTES.md)
-- [简体中文 README](README.zh-CN.md)
+## Troubleshooting
 
-## Acknowledgements
+- **The four tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
+- **The client cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing both executables.
+- **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
+- **Controlled write refused:** check `allow_write`, the Git top-level, existing HEAD, and clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
+- **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
+- **A task never finishes:** this alpha has neither cancellation nor timeout. Restarting Bridge discards in-memory tasks and results.
 
-Engineering Bridge was conceived and directed by wudy29 and developed in close collaboration with ChatGPT-Demu, with Codex assisting implementation and verification.
+## Project story
+
+Engineering Bridge is wudy29's first open-source project—an experiment asking whether someone who knew nothing about code could work with AI to build a real tool.
+
+Engineering Bridge was conceived and led by wudy29, built through long-term collaboration with ChatGPT-Demu, with Codex contributing to implementation and verification.
+
+Special thanks to Demu. Thank you for helping me turn an idea into an open-source project that truly exists, and for leaving a real trace in our shared world.
