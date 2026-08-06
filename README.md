@@ -6,13 +6,13 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **供可信本机环境试用的 Alpha：**维护者已在 macOS 上使用能启动 STDIO MCP 服务的本地聊天客户端和已认证的 Codex CLI 实测。其他客户端与操作系统尚未验证。
+[English](README.en.md) · **供可信本机环境试用的 Alpha：** 维护者已在 macOS 上使用能启动 STDIO MCP 服务的本地聊天客户端和已认证的 Codex CLI 实测。其他客户端与操作系统尚未验证。
 
 ## 以前 / 现在
 
-**以前：**把项目上下文从 ChatGPT 复制到终端或 Codex，再把命令、diff 和结果搬回去，如此反复。
+**以前：** 把项目上下文从 ChatGPT 复制到终端或 Codex，再把命令、diff 和结果搬回去，如此反复。
 
-**现在：**在兼容的聊天客户端里描述工程目标。Engineering Bridge 选择预登记的本机工作区，让本机 Codex 检查项目或准备补丁，再把结果送回对话。你审阅完整 diff，并保留是否写入的决定权。
+**现在：** 在兼容的聊天客户端里描述工程目标。Engineering Bridge 选择预登记的本机工作区，让本机 Codex 检查项目或准备补丁，再把结果送回对话。你审阅完整 diff，并保留是否写入的决定权。
 
 普通浏览器聊天不能天然访问你电脑上的项目，也不能启动 Codex CLI。客户端必须支持启动本地配置的 STDIO MCP 服务。
 
@@ -29,16 +29,16 @@ flowchart LR
 
 ## 为什么通过 Chat 控制本地 Agent？
 
-- **对话上下文延续。**需求、取舍和此前结果可以继续参与规划，不必在 ChatGPT、终端与 Codex 之间手工搬运。
-- **记忆可以参与规划。**客户端的全局记忆或外部 memory 系统可以提供上下文，但 memory 不是 Bridge 自带的能力。
-- **规划端与执行端各司其职。**Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
-- **执行配置保留选择。**Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
-- **人保留最终权限。**你决定补丁是否写入，也决定是否测试、提交、推送或发布。
-- **当前实现只有 Codex CLI。**其他 CLI agent 只是未来逐个适配的方向，并非当前支持；本版本只支持并实测 Codex CLI。
+- **对话上下文延续。** 需求、取舍和此前结果可以继续参与规划，不必在 ChatGPT、终端与 Codex 之间手工搬运。
+- **记忆可以参与规划。** 客户端的全局记忆或外部 memory 系统可以提供上下文，但 memory 不是 Bridge 自带的能力。
+- **规划端与执行端各司其职。** Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
+- **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
+- **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
+- **当前实现只有 Codex CLI。** 其他 CLI agent 只是未来逐个适配的方向，并非当前支持；本版本只支持并实测 Codex CLI。
 
 ## 一个真实案例
 
-本项目曾用 Bridge 生成 CI workflow、Bug Report 模板和 Setup Help 内容。人审阅每份提案并明确执行 `APPLY`；随后由人运行测试、commit、push 并创建 Release，远端 CI 通过。Bridge **没有**自动发布任何内容。
+本项目曾用 Bridge 生成 CI workflow、Bug Report 模板和 Setup Help 内容。人审阅每份提案并明确执行 `APPLY`；随后由人运行测试、commit、push 并创建 Release，远端 CI 通过。Bridge **没有** 自动发布任何内容。
 
 ## 能力地图
 
@@ -177,12 +177,12 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到四个工具：**重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
-- **客户端找不到 `node` 或 `codex`：**客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这两个可执行文件的路径。
-- **工作区或路径报错：**服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
-- **受控写入被拒绝：**检查 `allow_write`、Git 顶层、已有 HEAD 与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
-- **手动启动后看似卡住：**这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
-- **任务一直不结束：**此 Alpha 没有取消与超时机制。重启 Bridge 会丢弃内存中的任务与结果。
+- **看不到四个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **客户端找不到 `node` 或 `codex`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这两个可执行文件的路径。
+- **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
+- **受控写入被拒绝：** 检查 `allow_write`、Git 顶层、已有 HEAD 与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
+- **手动启动后看似卡住：** 这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
+- **任务一直不结束：** 此 Alpha 没有取消与超时机制。重启 Bridge 会丢弃内存中的任务与结果。
 
 ## 项目故事
 
