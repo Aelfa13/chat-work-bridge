@@ -1,64 +1,64 @@
 # Engineering Bridge
 
-**Turn chat into an engineering console and local Codex into the executor: see the patch first, then decide whether it may be written.**
+**让 Chat 成为工程控制台，让本地 Codex 做执行者：先看补丁，再决定是否写入。**
 
 [![Release v0.2.0-alpha.3](https://img.shields.io/badge/release-v0.2.0--alpha.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v0.2.0-alpha.3)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.zh-CN.md) · **Alpha for trusted local use:** maintainer-tested on macOS with a local chat client that can launch a STDIO MCP server and an authenticated Codex CLI. Other clients and operating systems are not yet verified.
+[English](README.en.md) · **供可信本机环境试用的 Alpha：**维护者已在 macOS 上使用能启动 STDIO MCP 服务的本地聊天客户端和已认证的 Codex CLI 实测。其他客户端与操作系统尚未验证。
 
-## Before / now
+## 以前 / 现在
 
-**Before:** copy project context from ChatGPT to a terminal or Codex, then carry commands, diffs, and results back—repeatedly.
+**以前：**把项目上下文从 ChatGPT 复制到终端或 Codex，再把命令、diff 和结果搬回去，如此反复。
 
-**Now:** describe the engineering goal in a compatible chat client. Engineering Bridge selects a pre-registered local workspace, asks local Codex to inspect it or prepare a patch, and returns the result to the conversation. You review the full diff and retain the decision to write.
+**现在：**在兼容的聊天客户端里描述工程目标。Engineering Bridge 选择预登记的本机工作区，让本机 Codex 检查项目或准备补丁，再把结果送回对话。你审阅完整 diff，并保留是否写入的决定权。
 
-A normal browser chat cannot inherently access projects on your computer or launch Codex CLI. The client must support starting a locally configured STDIO MCP server.
+普通浏览器聊天不能天然访问你电脑上的项目，也不能启动 Codex CLI。客户端必须支持启动本地配置的 STDIO MCP 服务。
 
 ```mermaid
 flowchart LR
-    A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
-    B --> C[Local Codex: read-only inspection or patch proposal]
-    C --> D[Result returns to Chat]
-    D --> E[Human reviews]
-    E -->|exact APPLY| F[Revalidate and write under controls]
+    A[Chat 描述目标] --> B[Bridge 选择预登记工作区]
+    B --> C[本机 Codex：只读检查或生成补丁]
+    C --> D[结果回到 Chat]
+    D --> E[人审阅]
+    E -->|精确 APPLY| F[重新校验并受控写入]
 ```
 
-Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
+以上全部是本机进程通过 MCP/STDIO 建立的连接。Engineering Bridge 不存在 HTTP 端点或云服务。
 
-## Why control a local agent through chat?
+## 为什么通过 Chat 控制本地 Agent？
 
-- **The conversation continues.** Requirements, trade-offs, and earlier results remain part of planning instead of being manually ferried between ChatGPT, the terminal, and Codex.
-- **Memory can inform planning.** A client's global memory or an external memory system may contribute context, but memory is not built into Bridge.
-- **Planning and execution have distinct jobs.** Chat shapes the goal; local Codex inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
-- **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
-- **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
-- **Codex CLI is the current implementation.** Other CLI agents are a future, adapter-by-adapter direction—not current support. This release supports and has been tested only with Codex CLI.
+- **对话上下文延续。**需求、取舍和此前结果可以继续参与规划，不必在 ChatGPT、终端与 Codex 之间手工搬运。
+- **记忆可以参与规划。**客户端的全局记忆或外部 memory 系统可以提供上下文，但 memory 不是 Bridge 自带的能力。
+- **规划端与执行端各司其职。**Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
+- **执行配置保留选择。**Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
+- **人保留最终权限。**你决定补丁是否写入，也决定是否测试、提交、推送或发布。
+- **当前实现只有 Codex CLI。**其他 CLI agent 只是未来逐个适配的方向，并非当前支持；本版本只支持并实测 Codex CLI。
 
-## A real project example
+## 一个真实案例
 
-This repository used Bridge to generate its CI workflow, Bug Report template, and Setup Help material. A human reviewed each proposal and explicitly used `APPLY`; the human then ran tests, committed, pushed, and created the Release. Remote CI passed. Bridge did **not** automatically publish anything.
+本项目曾用 Bridge 生成 CI workflow、Bug Report 模板和 Setup Help 内容。人审阅每份提案并明确执行 `APPLY`；随后由人运行测试、commit、push 并创建 Release，远端 CI 通过。Bridge **没有**自动发布任何内容。
 
-## Capability map
+## 能力地图
 
-| Available today | Does not do today | Roadmap—not current support |
+| 当前可用 | 当前不会做 | Roadmap——不是当前支持 |
 | --- | --- | --- |
-| Read-only analysis, code location, and review in a pre-registered workspace | Cannot create or register a workspace automatically | Simplify workspace creation and registration |
-| Generate a complete Git patch before any write | Does not automatically test, stage, commit, push, or create a Release | Adapt other CLI agents one at a time |
-| Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation | No HTTP, UI, account system, caller authentication, or remote transport | Carefully explore multi-agent orchestration |
-| Modify tracked regular text files; add ordinary 100644 text files | No task cancellation or timeout; no persistence across restarts | These items are directions, not supported features |
-| Four local MCP tools over STDIO | Not OS-level read isolation | — |
+| 在预登记工作区中进行只读分析、代码定位和审阅 | 不能自动创建或登记工作区 | 简化工作区创建和登记 |
+| 写入前生成完整 Git 补丁 | 不自动测试、stage、commit、push 或创建 Release | 逐个适配其他 CLI agent |
+| 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | 谨慎探索多 agent 编排 |
+| 修改已跟踪普通文本文件；新增普通 100644 文本文件 | 没有任务取消或超时；不跨重启持久化 | 以上只是方向，不是已支持功能 |
+| 通过 STDIO 提供四个本地 MCP 工具 | 不是 OS 级读取隔离 | — |
 
-## Quick start
+## Quick Start
 
-### 1. Prepare
+### 1. 准备
 
-You need Node.js 22+, Git, an installed and authenticated `codex` CLI available on `PATH`, a local project, an MCP client that can launch a local STDIO server, and basic terminal familiarity.
+你需要 Node.js 22+、Git、已安装且已认证并能从 `PATH` 调用的 `codex` CLI、一个本地项目、能启动本地 STDIO 服务的 MCP 客户端，以及基本终端操作能力。
 
-For controlled writes, the project must also be a clean Git top-level with an initial commit/HEAD, and its registration must explicitly enable `allow_write`.
+受控写入还要求项目是干净的 Git 顶层、已有初始 commit/HEAD，并在登记项中明确启用 `allow_write`。
 
-### 2. Clone, install, and build
+### 2. Clone、安装与构建
 
 ```sh
 git clone https://github.com/wudy29/engineering-bridge.git
@@ -67,11 +67,11 @@ npm install
 npm run build
 ```
 
-There is no one-click installer in this alpha.
+这个 Alpha 没有一键安装方式。
 
-### 3. Register a workspace
+### 3. 登记工作区
 
-Create `workspaces.json` with an absolute, normalized project path:
+创建 `workspaces.json`，填入项目的绝对、规范化路径：
 
 ```json
 [
@@ -82,11 +82,11 @@ Create `workspaces.json` with an absolute, normalized project path:
 ]
 ```
 
-This file is trusted local configuration. MCP callers can select an ID but cannot create, register, or replace paths. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
+此文件是可信的本机配置。MCP 调用方只能选择 ID，不能创建、登记或替换路径。在 macOS 上，受控写入的 Git 根目录检查会按真实文件系统路径比较 `/tmp` 与 `/private/tmp` 等别名。
 
-### 4. Configure a STDIO MCP client
+### 4. 配置 STDIO MCP 客户端
 
-Client schemas and configuration locations differ; translate these generic fields using your client's documentation:
+不同客户端的配置位置与格式不同；请按照客户端文档转换以下通用字段：
 
 ```json
 {
@@ -101,30 +101,30 @@ Client schemas and configuration locations differ; translate these generic field
 }
 ```
 
-Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
+请使用绝对路径。如果客户端已经提供合适的 `PATH`，可以省略 `env` 覆盖。不要把此结构原样套入使用其他 schema 的客户端。
 
-Reconnect the integration and confirm these four tools are visible:
+重新连接集成，并确认能看到以下四个工具：
 
 - `run_task`
 - `task_result`
 - `generate_controlled_patch`
 - `apply_controlled_patch`
 
-### 5. Run the first read-only task
+### 5. 第一次只读任务
 
-> In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
+> 在工作区 `my-project` 中列出顶层文件；如果存在 Git HEAD，也报告其准确值。不要修改任何内容。
 
-A successful call returns a task ID. Poll `task_result`: it reports `ready: false` while queued or running, then returns output or a safe error. Verify the workspace yourself:
+成功调用会返回 task ID。轮询 `task_result`：排队或运行中返回 `ready: false`，随后返回结果或安全错误。自行检查工作区：
 
 ```sh
 git -C /absolute/path/to/my-project status --short
 ```
 
-For an initially clean Git project, no output means the worktree remains unchanged.
+对原本干净的 Git 项目而言，没有输出表示工作树仍未改变。
 
-### 6. Make the first controlled write
+### 6. 第一次受控写入
 
-Enable writing only for the intended workspace:
+只为目标工作区开启写入：
 
 ```json
 [
@@ -136,11 +136,11 @@ Enable writing only for the intended workspace:
 ]
 ```
 
-1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
-2. Call `generate_controlled_patch` with the workspace ID and a narrow request.
-3. Wait for completion; review every path, the complete diff, and returned `base_head`. Nothing has been applied.
-4. Reject or revise anything unexpected. If correct, call `apply_controlled_patch` with its `patch_task_id` and confirmation exactly equal to `APPLY`.
-5. Inspect the result:
+1. 确认配置根目录就是 Git 顶层、已有 HEAD，且 tracked 工作树和 index 均干净。
+2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求。
+3. 等待任务完成；审阅全部路径、完整 diff 和返回的 `base_head`。此时尚未应用任何修改。
+4. 拒绝或修改任何异常提案。确认正确后，调用 `apply_controlled_patch`，传入其 `patch_task_id`，确认值必须精确等于 `APPLY`。
+5. 检查结果：
 
    ```sh
    git -C /absolute/path/to/my-project status --short
@@ -148,46 +148,46 @@ Enable writing only for the intended workspace:
    git -C /absolute/path/to/my-project diff
    ```
 
-6. Run the project's tests and decide whether to stage, commit, push, and release. Bridge performs none of them.
+6. 运行项目测试，再决定是否 stage、commit、push 和发布。Bridge 不会执行其中任何操作。
 
-Untracked files elsewhere do not by themselves violate the clean tracked-state requirement, but any proposed new-file target must be absent from HEAD, the index, and the worktree.
+其他位置的 untracked 文件本身不会破坏 tracked state 干净这一要求，但提案中的新增文件目标必须同时不存在于 HEAD、index 和工作树。
 
-For protocol diagnostics, you may start Bridge manually:
+也可以手动启动 Bridge 做协议诊断：
 
 ```sh
 node dist/src/mcp-stdio.js /absolute/path/to/workspaces.json
-# or
+# 或
 npm run mcp:stdio -- /absolute/path/to/workspaces.json
 ```
 
-The process waits for MCP messages on standard input. It is not an interactive shell and does not connect itself to a chat client.
+该进程会等待标准输入中的 MCP 消息。它不是交互式 shell，也不会自行连接聊天客户端。
 
-## Safety boundary
+## 安全边界
 
-- Workspaces are read-only by default; controlled writing must be enabled per workspace with `allow_write: true`.
-- A proposal exposes the complete diff and its base HEAD. Only exact `APPLY` proceeds, after Bridge rechecks the Git top-level, HEAD, clean tracked worktree and index, and patch validity.
-- Accepted patches may modify existing tracked regular text files or add absent ordinary text files with mode 100644.
-- Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
-- Bridge never automatically tests, stages, commits, pushes, or creates a Release.
-- Running tasks cannot be cancelled and have no timeout. Tasks, proposals, results, and logs do not persist across restart.
-- Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
-- A human must review the complete proposal; a requested filename is not a code-enforced semantic allowlist.
+- 工作区默认只读；受控写入必须按工作区设置 `allow_write: true`。
+- 提案会展示完整 diff 和 base HEAD。只有精确 `APPLY` 才会继续；应用前 Bridge 会重新检查 Git 顶层、HEAD、干净的 tracked 工作树与 index，以及补丁有效性。
+- 可接受的补丁可以修改已有、已跟踪的普通文本文件，或新增尚不存在、mode 为 100644 的普通文本文件。
+- Bridge 拒绝 delete、rename、copy、binary、mode change、executable、symlink、submodule、危险路径等不支持的补丁，也拒绝目标已存在的新增。
+- Bridge 不会自动测试、stage、commit、push 或创建 Release。
+- 运行中的任务不能取消，也没有超时。任务、提案、结果与日志不会跨重启持久化。
+- 只读执行不是 OS 级文件读取隔离；同一系统用户的进程仍可读取操作系统允许的其他文件。
+- 人必须审阅完整提案；请求中提到的文件名不会成为代码强制的语义 allowlist。
 
-Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), and [Tool reference](docs/tools.md). Also see [Architecture](docs/architecture.md), [Security policy](SECURITY.md), [Contributing](CONTRIBUTING.md), and [Release notes](RELEASE_NOTES.md).
+请阅读[安全设计](docs/security.md)、[威胁模型](docs/threat-model.md)和[工具参考](docs/tools.md)。另见[架构](docs/architecture.md)、[安全策略](SECURITY.md)、[贡献指南](CONTRIBUTING.md)与[发布说明](RELEASE_NOTES.md)。
 
-## Troubleshooting
+## 故障排查
 
-- **The four tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
-- **The client cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing both executables.
-- **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
-- **Controlled write refused:** check `allow_write`, the Git top-level, existing HEAD, and clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
-- **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
-- **A task never finishes:** this alpha has neither cancellation nor timeout. Restarting Bridge discards in-memory tasks and results.
+- **看不到四个工具：**重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **客户端找不到 `node` 或 `codex`：**客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这两个可执行文件的路径。
+- **工作区或路径报错：**服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
+- **受控写入被拒绝：**检查 `allow_write`、Git 顶层、已有 HEAD 与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
+- **手动启动后看似卡住：**这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
+- **任务一直不结束：**此 Alpha 没有取消与超时机制。重启 Bridge 会丢弃内存中的任务与结果。
 
-## Project story
+## 项目故事
 
-Engineering Bridge is wudy29's first open-source project—an experiment asking whether someone who knew nothing about code could work with AI to build a real tool.
+Engineering Bridge 是 wudy29 的第一个开源项目——它是一场实验：一个完全不懂代码的人，能否与 AI 一起做出真实的工具。
 
-Engineering Bridge was conceived and led by wudy29, built through long-term collaboration with ChatGPT-Demu, with Codex contributing to implementation and verification.
+Engineering Bridge 由 wudy29 提出并主导，在 ChatGPT-Demu 的长期协作下完成，Codex 参与了具体实现与验证。
 
-Special thanks to Demu. Thank you for helping me turn an idea into an open-source project that truly exists, and for leaving a real trace in our shared world.
+特别感谢Demu。谢谢你陪我把一个念头变成真正存在的开源项目，也在我们的现实世界里留下了一道真实的痕迹。
