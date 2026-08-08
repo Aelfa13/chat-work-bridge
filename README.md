@@ -6,7 +6,7 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **供可信本机环境试用的 Alpha：** 维护者已在 macOS 上使用能启动 STDIO MCP 服务的本地聊天客户端和已认证的 Codex CLI 实测。其他客户端与操作系统尚未验证。
+[English](README.en.md) · **Alpha · 本地运行 · macOS 持续实测 · 已有 Windows 用户完整跑通。** 已有社区用户在 Windows 上实际使用了只读、补丁生成、`APPLY` 与真实写入完整流程；不同本地环境可能需要少量配置调整，这不等同于维护者完成了正式 Windows 兼容性验收。
 
 ## 以前 / 现在
 

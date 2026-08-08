@@ -6,7 +6,7 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **Alpha for trusted local use:** maintainer-tested on macOS with a local chat client that can launch a STDIO MCP server and an authenticated Codex CLI. Other clients and operating systems are not yet verified.
+[简体中文](README.md) · **Alpha · Local · Maintainer-tested on macOS · Full workflow successfully used on Windows.** A community Windows user has successfully used the read-only, patch proposal, `APPLY`, and real-write flow; minor local adjustments may be needed, and this is not formal maintainer-certified Windows compatibility.
 
 ## Before / now
 
