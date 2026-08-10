@@ -2,11 +2,11 @@
 
 **Turn chat into an engineering console and local Codex into the executor: see the patch first, then decide whether it may be written.**
 
-[![Release v0.2.0-alpha.3](https://img.shields.io/badge/release-v0.2.0--alpha.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v0.2.0-alpha.3)
+![1.0.0 candidate](https://img.shields.io/badge/release-1.0.0%20candidate-blue)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **Alpha · Local · Maintainer-tested on macOS · Full workflow successfully used on Windows.** A community Windows user has successfully used the read-only, patch proposal, `APPLY`, and real-write flow; minor local adjustments may be needed, and this is not formal maintainer-certified Windows compatibility.
+[简体中文](README.md) · **V1 / 1.0.0 candidate · Alpha · Local · Maintainer-tested on macOS · Full workflow successfully used on Windows.** This is a candidate description only; it does not claim a `v1.0.0` tag, GitHub Release, or npm publication. A community Windows user has successfully used the read-only, patch proposal, `APPLY`, and real-write flow; minor local adjustments may be needed, and this is not formal maintainer-certified Windows compatibility.
 
 ## Before / now
 
@@ -47,8 +47,8 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 | Read-only analysis, code location, and review in a pre-registered workspace | Cannot create or register a workspace automatically | Simplify workspace creation and registration |
 | Generate a complete Git patch before any write | Does not automatically test, stage, commit, push, or create a Release | Adapt other CLI agents one at a time |
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation | No HTTP, UI, account system, caller authentication, or remote transport | Carefully explore multi-agent orchestration |
-| Modify tracked regular text files; add ordinary 100644 text files | No task cancellation or timeout; no persistence across restarts | These items are directions, not supported features |
-| Four local MCP tools over STDIO | Not OS-level read isolation | — |
+| Modify tracked regular text files; add ordinary 100644 text files | No automatic timeout; no persistence across restarts | These items are directions, not supported features |
+| Five local MCP tools over STDIO | Not OS-level read isolation | — |
 
 ## Quick start
 
@@ -103,10 +103,11 @@ Client schemas and configuration locations differ; translate these generic field
 
 Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
 
-Reconnect the integration and confirm these four tools are visible:
+Reconnect the integration and confirm these five tools are visible:
 
 - `run_task`
 - `task_result`
+- `control_task`
 - `generate_controlled_patch`
 - `apply_controlled_patch`
 
@@ -114,7 +115,7 @@ Reconnect the integration and confirm these four tools are visible:
 
 > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
 
-A successful call returns a task ID. Poll `task_result`: it reports `ready: false` while queued or running, then returns output or a safe error. Verify the workspace yourself:
+Ordinary `run_task` is always read-only and returns a task ID on success. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `control_task` accepts only interactive `run_task` task IDs and state-checks `continue`, `steer`, `interrupt`, and `accept`: `continue` preserves native Codex thread continuity, `interrupt` applies only while an interactive task is running and ends it as failed, and only finalization exposes final `output` or `error` through `task_result`. Verify the workspace yourself:
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -137,9 +138,9 @@ Enable writing only for the intended workspace:
 ```
 
 1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
-2. Call `generate_controlled_patch` with the workspace ID and a narrow request.
-3. Wait for completion; review every path, the complete diff, and returned `base_head`. Nothing has been applied.
-4. Reject or revise anything unexpected. If correct, call `apply_controlled_patch` with its `patch_task_id` and confirmation exactly equal to `APPLY`.
+2. Call `generate_controlled_patch` with the workspace ID and a narrow request. It uses the legacy proposal-task path, not the interactive `run_task` control flow.
+3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
+4. Review every path, the complete diff, and returned `base_head` outside task state. If acceptable, call `apply_controlled_patch` directly with that `patch_task_id` and confirmation exactly equal to `APPLY`.
 5. Inspect the result:
 
    ```sh
@@ -169,7 +170,9 @@ The process waits for MCP messages on standard input. It is not an interactive s
 - Accepted patches may modify existing tracked regular text files or add absent ordinary text files with mode 100644.
 - Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
 - Bridge never automatically tests, stages, commits, pushes, or creates a Release.
-- Running tasks cannot be cancelled and have no timeout. Tasks, proposals, results, and logs do not persist across restart.
+- The Codex backend is `codex app-server --stdio`, with no shell, approval `never`, and network disabled. Ordinary/supervisor tasks and proposal generation remain read-only; only exact reviewed `APPLY` is a filesystem write path.
+- State is process-local, with no restart recovery or automatic timeout. Explicit `interrupt` exists only for running interactive tasks.
+- Alpha.4 project binding is not implemented; `workspace_id` remains required.
 - Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
 - A human must review the complete proposal; a requested filename is not a code-enforced semantic allowlist.
 
@@ -177,12 +180,12 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 
 ## Troubleshooting
 
-- **The four tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
+- **The five tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
 - **The client cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing both executables.
 - **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
 - **Controlled write refused:** check `allow_write`, the Git top-level, existing HEAD, and clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
 - **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
-- **A task never finishes:** this alpha has neither cancellation nor timeout. Restarting Bridge discards in-memory tasks and results.
+- **A task never finishes:** there is no automatic timeout. A running interactive task can be explicitly interrupted through `control_task`; other tasks can only be polled, and restarting Bridge discards all in-memory state.
 
 ## Project story
 

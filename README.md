@@ -2,11 +2,11 @@
 
 **让 Chat 成为工程控制台，让本地 Codex 做执行者：先看补丁，再决定是否写入。**
 
-[![Release v0.2.0-alpha.3](https://img.shields.io/badge/release-v0.2.0--alpha.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v0.2.0-alpha.3)
+![1.0.0 candidate](https://img.shields.io/badge/release-1.0.0%20candidate-blue)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **Alpha · 本地运行 · macOS 持续实测 · 已有 Windows 用户完整跑通。** 已有社区用户在 Windows 上实际使用了只读、补丁生成、`APPLY` 与真实写入完整流程；不同本地环境可能需要少量配置调整，这不等同于维护者完成了正式 Windows 兼容性验收。
+[English](README.en.md) · **V1 / 1.0.0 候选版 · Alpha · 本地运行 · macOS 持续实测 · 已有 Windows 用户完整跑通。** 这只是候选版说明，不表示已经存在 `v1.0.0` tag、GitHub Release 或 npm 发布。已有社区用户在 Windows 上实际使用了只读、补丁生成、`APPLY` 与真实写入完整流程；不同本地环境可能需要少量配置调整，这不等同于维护者完成了正式 Windows 兼容性验收。
 
 ## 以前 / 现在
 
@@ -47,8 +47,8 @@ flowchart LR
 | 在预登记工作区中进行只读分析、代码定位和审阅 | 不能自动创建或登记工作区 | 简化工作区创建和登记 |
 | 写入前生成完整 Git 补丁 | 不自动测试、stage、commit、push 或创建 Release | 逐个适配其他 CLI agent |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | 谨慎探索多 agent 编排 |
-| 修改已跟踪普通文本文件；新增普通 100644 文本文件 | 没有任务取消或超时；不跨重启持久化 | 以上只是方向，不是已支持功能 |
-| 通过 STDIO 提供四个本地 MCP 工具 | 不是 OS 级读取隔离 | — |
+| 修改已跟踪普通文本文件；新增普通 100644 文本文件 | 没有自动超时；不跨重启持久化 | 以上只是方向，不是已支持功能 |
+| 通过 STDIO 提供五个本地 MCP 工具 | 不是 OS 级读取隔离 | — |
 
 ## Quick Start
 
@@ -103,10 +103,11 @@ npm run build
 
 请使用绝对路径。如果客户端已经提供合适的 `PATH`，可以省略 `env` 覆盖。不要把此结构原样套入使用其他 schema 的客户端。
 
-重新连接集成，并确认能看到以下四个工具：
+重新连接集成，并确认能看到以下五个工具：
 
 - `run_task`
 - `task_result`
+- `control_task`
 - `generate_controlled_patch`
 - `apply_controlled_patch`
 
@@ -114,7 +115,7 @@ npm run build
 
 > 在工作区 `my-project` 中列出顶层文件；如果存在 Git HEAD，也报告其准确值。不要修改任何内容。
 
-成功调用会返回 task ID。轮询 `task_result`：排队或运行中返回 `ready: false`，随后返回结果或安全错误。自行检查工作区：
+普通 `run_task` 始终只读，成功调用会返回 task ID。轮询 `task_result`：非交互任务在排队或运行中返回 `ready: false`，最终返回 `output` 或安全的 `error`。交互任务的成功轮次进入 `waiting_for_supervisor_review`；此时结果包含状态/就绪信息、有限的证据和接受前可见的 `review_output`。`control_task` 只接受交互式 `run_task` 的 task ID，并以状态检查支持 `continue`、`steer`、`interrupt` 和 `accept`：`continue` 保留原生 Codex thread 连续性，`interrupt` 只适用于正在运行的交互任务并以 failed 结束，`accept` 完成后 `task_result` 才返回最终 `output` 或 `error`。自行检查工作区：
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -137,9 +138,9 @@ git -C /absolute/path/to/my-project status --short
 ```
 
 1. 确认配置根目录就是 Git 顶层、已有 HEAD，且 tracked 工作树和 index 均干净。
-2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求。
-3. 等待任务完成；审阅全部路径、完整 diff 和返回的 `base_head`。此时尚未应用任何修改。
-4. 拒绝或修改任何异常提案。确认正确后，调用 `apply_controlled_patch`，传入其 `patch_task_id`，确认值必须精确等于 `APPLY`。
+2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求。它使用旧版提案任务路径，而不是交互式 `run_task` 控制流。
+3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
+4. 在任务状态之外人工审阅全部路径、完整 diff 和返回的 `base_head`。确认正确后直接调用 `apply_controlled_patch`，传入该 `patch_task_id`，确认值必须精确等于 `APPLY`。
 5. 检查结果：
 
    ```sh
@@ -169,7 +170,9 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 - 可接受的补丁可以修改已有、已跟踪的普通文本文件，或新增尚不存在、mode 为 100644 的普通文本文件。
 - Bridge 拒绝 delete、rename、copy、binary、mode change、executable、symlink、submodule、危险路径等不支持的补丁，也拒绝目标已存在的新增。
 - Bridge 不会自动测试、stage、commit、push 或创建 Release。
-- 运行中的任务不能取消，也没有超时。任务、提案、结果与日志不会跨重启持久化。
+- Codex 后端是 `codex app-server --stdio`，不经过 shell，approval 为 `never`，网络禁用；普通/监督任务和提案生成均保持只读，只有经审阅后精确确认 `APPLY` 的应用步骤会写文件。
+- 状态仅存在于当前进程，没有重启恢复或自动超时。显式 `interrupt` 只适用于正在运行的交互任务。
+- Alpha.4 的项目绑定尚未实现；仍必须提供 `workspace_id`。
 - 只读执行不是 OS 级文件读取隔离；同一系统用户的进程仍可读取操作系统允许的其他文件。
 - 人必须审阅完整提案；请求中提到的文件名不会成为代码强制的语义 allowlist。
 
@@ -177,12 +180,12 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到四个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **看不到五个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node` 或 `codex`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这两个可执行文件的路径。
 - **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
 - **受控写入被拒绝：** 检查 `allow_write`、Git 顶层、已有 HEAD 与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
 - **手动启动后看似卡住：** 这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
-- **任务一直不结束：** 此 Alpha 没有取消与超时机制。重启 Bridge 会丢弃内存中的任务与结果。
+- **任务一直不结束：** 没有自动超时；正在运行的交互任务可通过 `control_task` 显式 `interrupt`。其他任务只能继续轮询，重启 Bridge 会丢弃全部内存状态。
 
 ## 项目故事
 
