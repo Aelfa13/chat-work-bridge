@@ -21,6 +21,7 @@ interface Invocation {
 }
 
 interface FakeBehavior {
+  appServerOutput?: string;
   stdout?: string;
   stderr?: string;
   exitCode?: number;
@@ -36,13 +37,29 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
     const stdin = new Writable({
       write(chunk, _encoding, callback) {
         invocation.stdin += chunk.toString();
+        if (behavior.appServerOutput !== undefined) {
+          const message = JSON.parse(chunk.toString()) as { id?: number; method: string };
+          if (message.id !== undefined) {
+            let result: unknown = {};
+            if (message.method === "thread/start") result = { thread: { id: "thread-1" } };
+            if (message.method === "turn/start") result = { turn: { id: "turn-1" } };
+            queueMicrotask(() => {
+              stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
+              if (message.method === "turn/start") {
+                stdout.write(`${JSON.stringify({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: behavior.appServerOutput } } })}\n`);
+                stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } })}\n`);
+              }
+            });
+          }
+        }
         callback();
       }
     });
     invocations.push(invocation);
-    Object.assign(child, { stdin, stdout, stderr });
+    Object.assign(child, { stdin, stdout, stderr, killed: false, kill() { this.killed = true; return true; } });
 
     queueMicrotask(() => {
+      if (behavior.appServerOutput !== undefined) return;
       if (behavior.processError === true) {
         child.emit("error", new Error("secret process error"));
         return;
@@ -72,26 +89,18 @@ test("uses the fixed safe invocation and returns agent text", async () => {
     EMPTY_ALLOWED: ""
   };
   const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({
-    stdout: [
-      JSON.stringify({ type: "thread.started", thread_id: "ignored" }),
-      JSON.stringify({ type: "item.completed", item: { type: "agent_message", text: "final answer" } })
-    ].join("\n")
+    appServerOutput: "final answer"
   }, invocations), hostEnvironment);
   const instruction = "  exact prompt\nwith $() and `quotes`  ";
 
-  assert.deepEqual(await executor.execute({ taskId: TASK_ID, instruction }), {
-    kind: "completed", output: "final answer"
-  });
+  const result = await executor.execute({ taskId: TASK_ID, instruction });
+  assert.equal(result.kind, "completed");
+  if (result.kind === "completed") assert.equal(result.output, "final answer");
   assert.equal(invocations.length, 1);
   const invocation = invocations[0];
   assert.ok(invocation);
   assert.equal(invocation.executable, "codex");
-  assert.deepEqual(invocation.args, [
-    "-a", "never", "exec", "--sandbox", "read-only", "--ephemeral", "--json",
-    "--cd", TRUSTED_CWD, "--ignore-user-config", "--strict-config",
-    "-c", "sandbox_workspace_write.network_access=false", "-"
-  ]);
-  assert.equal(invocation.args.includes("network_access=false"), false);
+  assert.deepEqual(invocation.args, ["app-server", "--stdio"]);
   assert.equal(invocation.options.cwd, TRUSTED_CWD);
   assert.equal(invocation.options.shell, false);
   assert.deepEqual(invocation.options.stdio, ["pipe", "pipe", "pipe"]);
@@ -99,7 +108,11 @@ test("uses the fixed safe invocation and returns agent text", async () => {
     PATH: "/bin", HOME: "/home/test", CODEX_HOME: "/codex/test", TMPDIR: "/tmp/test",
     LANG: "en_US.UTF-8", LC_ALL: "C", USER: "tester", LOGNAME: "tester-log"
   });
-  assert.equal(invocation.stdin, instruction);
+  const messages = invocation.stdin.trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(messages[0], { id: 1, method: "initialize", params: { clientInfo: { name: "engineering-bridge", version: "1.0.0" } } });
+  assert.deepEqual(messages[1], { method: "initialized", params: {} });
+  assert.deepEqual(messages[2], { id: 2, method: "thread/start", params: { cwd: TRUSTED_CWD, approvalPolicy: "never", sandbox: "read-only" } });
+  assert.deepEqual(messages[3], { id: 3, method: "turn/start", params: { threadId: "thread-1", input: [{ type: "text", text: instruction }], cwd: TRUSTED_CWD, approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
   assert.equal(invocation.args.includes(instruction), false);
 });
 

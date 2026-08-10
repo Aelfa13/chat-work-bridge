@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { CodexExecutor } from "./executors/codex-executor.js";
+import { serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
 import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
 import { RegisteredWorkspaceRegistry } from "./workspaces/registered-workspace-registry.js";
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
       instruction: z.string().min(1)
     }
   }, ({ workspace_id, instruction }) => {
-    const { taskId } = service.runTask({ workspace_id, instruction });
+    const { taskId } = service.startTask({ workspace_id, instruction });
     return jsonContent({ task_id: taskId });
   });
 
@@ -61,17 +62,30 @@ async function main(): Promise<void> {
     description: "Retrieve the completed output or safe error for a task. This tool is read-only.",
     inputSchema: { task_id: z.string() }
   }, ({ task_id }) => {
-    const status = service.status(task_id);
-    if (status === undefined) return unknownTask();
-    if (status.state === "queued" || status.state === "running") {
-      return jsonContent({ task_id: status.taskId, state: status.state, ready: false });
-    }
+    const view = service.taskView(task_id);
+    if (view === undefined) return unknownTask();
+    return jsonContent({ task_id: view.taskId, state: view.state, ready: view.ready,
+      ...(view.output === undefined ? {} : { output: view.output }),
+      ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
+      evidence: view.evidence,
+      ...(view.error === undefined ? {} : { error: view.error }) });
+  });
 
-    const result = service.result(task_id);
-    if (result === undefined) return unknownTask();
-    return result.state === "completed"
-      ? jsonContent({ task_id: result.id, state: result.state, output: result.output })
-      : jsonContent({ task_id: result.id, state: result.state, error: result.error });
+  server.registerTool("control_task", {
+    description: "Steer or interrupt a running task, continue a reviewed task, or accept reviewed output.",
+    inputSchema: {
+      task_id: z.string(),
+      action: z.enum(["continue", "steer", "interrupt", "accept"]),
+      instruction: z.string().optional()
+    }
+  }, async ({ task_id, action, instruction }) => {
+    if (service.taskView(task_id) === undefined) return unknownTask();
+    try {
+      const view = await service.controlTask(task_id, action, instruction);
+      return jsonContent({ task_id: view.taskId, state: view.state });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
   });
 
   server.registerTool("generate_controlled_patch", {
