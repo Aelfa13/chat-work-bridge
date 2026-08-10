@@ -42,6 +42,27 @@ test("returns immediately and exposes queued/running without a result", async ()
   await waitForTerminal(service, taskId);
 });
 
+test("taskView polls a legacy runTask through completed output", async () => {
+  const pending = deferred<ExecutorResult>();
+  const executor: Executor = { execute: () => pending.promise };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
+
+  assert.deepEqual(service.taskView(taskId), { taskId, state: "queued", ready: false });
+  await Promise.resolve();
+  assert.deepEqual(service.taskView(taskId), { taskId, state: "running", ready: false });
+
+  pending.resolve({ kind: "completed", output: "proposal diff" });
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "completed",
+    ready: true,
+    output: "proposal diff"
+  });
+});
+
 test("records completed output and preserves the instruction", async () => {
   const calls: ExecutorRequest[] = [];
   const executor: Executor = {

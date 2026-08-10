@@ -83,7 +83,16 @@ export class RegisteredWorkspaceTaskService {
   taskView(taskId: unknown): ControlledTaskView | undefined {
     if (!isId(taskId)) return undefined;
     const record = this.interactive.get(taskId);
-    if (!record) return undefined;
+    if (!record) {
+      const legacy = this.tasks.get(taskId);
+      if (!legacy) return undefined;
+      if (!("result" in legacy)) {
+        return { taskId, state: legacy.state, ready: false };
+      }
+      return legacy.result.state === "completed"
+        ? { taskId, state: "completed", ready: true, output: legacy.result.output }
+        : { taskId, state: "failed", ready: true, error: legacy.result.error };
+    }
     const base = { taskId, state: record.state, evidence: record.evidence };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
