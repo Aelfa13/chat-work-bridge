@@ -111,6 +111,27 @@ test("records an interrupted legacy task as an execution failure", async () => {
   });
 });
 
+test("records an interrupted interactive task as an execution failure without review output", async () => {
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    ready: true,
+    evidence: [],
+    error: {
+      code: "CODEX_EXECUTION_FAILED",
+      message: "Codex execution failed."
+    }
+  });
+});
+
 test("records an unknown workspace asynchronously without creating an executor", async () => {
   let factories = 0;
   const service = new RegisteredWorkspaceTaskService(registry(), () => {

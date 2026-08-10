@@ -133,7 +133,11 @@ export class RegisteredWorkspaceTaskService {
       record.threadId = result.threadId ?? record.threadId;
       record.evidence = result.evidence ?? record.evidence;
       if (result.kind === "failed") { record.state = "failed"; record.error = result.error; }
-      else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
+      else if (result.kind === "interrupted") {
+        record.state = "failed";
+        record.output = undefined;
+        record.error = serializeError(new CoreError("CODEX_EXECUTION_FAILED"));
+      } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
     } catch (error) {
       record.executor = undefined; record.state = "failed"; record.error = serializeError(error);
     }
