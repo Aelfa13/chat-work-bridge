@@ -93,6 +93,24 @@ test("records executor failures", async () => {
   assert.deepEqual(service.result(taskId), { id: taskId, state: "failed", error });
 });
 
+test("records an interrupted legacy task as an execution failure", async () => {
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
+
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(service.status(taskId), { taskId, state: "failed" });
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "CODEX_EXECUTION_FAILED",
+      message: "Codex execution failed."
+    }
+  });
+});
+
 test("records an unknown workspace asynchronously without creating an executor", async () => {
   let factories = 0;
   const service = new RegisteredWorkspaceTaskService(registry(), () => {

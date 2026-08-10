@@ -159,7 +159,7 @@ export class RegisteredWorkspaceTaskService {
         }
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
-          : { id: taskId, state: "completed", output: result.output };
+          : { id: taskId, state: "failed", error: serializeError(new CoreError("CODEX_EXECUTION_FAILED")) };
       this.tasks.set(taskId, { state: taskResult.state, result: taskResult });
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {
