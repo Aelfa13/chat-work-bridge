@@ -127,7 +127,7 @@ export class RegisteredWorkspaceTaskService {
       const executor = this.executorFactory(registration.root);
       record.executor = executor;
       const result = await executor.execute({ taskId, instruction: record.request.instruction,
-        sandbox: registration.allowWrite ? "workspace-write" : "read-only", threadId: record.threadId,
+        sandbox: "read-only", threadId: record.threadId,
         onEvidence: (items) => { record.evidence = items; } });
       record.executor = undefined;
       record.threadId = result.threadId ?? record.threadId;

@@ -132,6 +132,25 @@ test("records an interrupted interactive task as an execution failure without re
   });
 });
 
+test("interactive execution remains read-only when workspace writes are allowed", async () => {
+  const calls: ExecutorRequest[] = [];
+  const executor: Executor = {
+    execute: async (request) => { calls.push(request); return { kind: "completed", output: "done" }; }
+  };
+  const writableRegistry = new RegisteredWorkspaceRegistry([
+    { id: "known", root: ROOT, allow_write: true }
+  ]);
+  const service = new RegisteredWorkspaceTaskService(writableRegistry, () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.sandbox, "read-only");
+});
+
 test("records an unknown workspace asynchronously without creating an executor", async () => {
   let factories = 0;
   const service = new RegisteredWorkspaceTaskService(registry(), () => {
