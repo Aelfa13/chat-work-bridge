@@ -1,12 +1,29 @@
 # Engineering Bridge
 
-**Turn chat into an engineering console and local Codex into the executor: see the patch first, then decide whether it may be written.**
+**Connect Chat directly to local Codex: no more shuttling prompts and results—Chat dispatches, supervises, and accepts Codex work.**
 
 [![Pre-release v1.0.0-rc.1](https://img.shields.io/badge/pre--release-v1.0.0--rc.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [简体中文](README.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · Local · Continuously tested on macOS.** This is a V1 pre-release candidate, not stable `v1.0.0`, and it does not indicate npm publication. A community user successfully ran the earlier full read-only, patch-generation, `APPLY`, and real-write flow on Windows; `v1.0.0-rc.1` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+
+## Before / now
+
+**Before:** you discussed requirements in Chat, manually copied a prompt into Codex, then carried Codex's result back to Chat for the next round—repeating the shuttle each time.
+
+**Now:** Chat hands the task directly to local Codex and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. For controlled changes, you still review the complete diff first and retain the decision to write.
+
+```mermaid
+flowchart LR
+    A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
+    B --> C[Local Codex: read-only inspection or patch proposal]
+    C --> D[Result returns to Chat]
+    D --> E[Human reviews]
+    E -->|exact APPLY| F[Revalidate and write under controls]
+```
+
+Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
 
 ## What is it?
 
@@ -33,23 +50,6 @@ There are four roles:
 - **Controlled change:** “Prepare a patch that adjusts the timeout message; show the complete diff first, and write only after my exact `APPLY`.”
 
 The controlled-write rule is simple: **show the diff first, write only after exact `APPLY`.** Bridge does not automatically test, stage, commit, push, or release.
-
-## Before / now
-
-**Before:** copy project context from ChatGPT to a terminal or Codex, then carry commands, diffs, and results back—repeatedly.
-
-**Now:** describe the engineering goal in a compatible chat client. Engineering Bridge selects a pre-registered local workspace, asks local Codex to inspect it or prepare a patch, and returns the result to the conversation. You review the full diff and retain the decision to write.
-
-```mermaid
-flowchart LR
-    A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
-    B --> C[Local Codex: read-only inspection or patch proposal]
-    C --> D[Result returns to Chat]
-    D --> E[Human reviews]
-    E -->|exact APPLY| F[Revalidate and write under controls]
-```
-
-Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
 
 ## Why control a local agent through chat?
 

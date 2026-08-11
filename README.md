@@ -1,12 +1,29 @@
 # Engineering Bridge
 
-**让 Chat 成为工程控制台，让本地 Codex 做执行者：先看补丁，再决定是否写入。**
+**打通 Chat 与本地 Codex：不再搬提示词，Chat 直接调度、监督并验收 Codex。**
 
 [![Pre-release v1.0.0-rc.1](https://img.shields.io/badge/pre--release-v1.0.0--rc.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 [English](README.en.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · 本地运行 · macOS 持续实测。** 这是 V1 的预发布候选版本，不是稳定版 `v1.0.0`，也不表示已发布到 npm。早期版本已有社区用户在 Windows 上实际跑通只读、补丁生成、`APPLY` 与真实写入的完整流程；`v1.0.0-rc.1` 仍需外部 Windows 与多客户端验证，不等同于维护者认证 Windows 兼容。
+
+## 以前 / 现在
+
+**以前：** 你先在 Chat 里讨论需求，再把提示词手工复制到 Codex；Codex 完成一轮后，你又把结果搬回 Chat 继续讨论，然后反复往返。
+
+**现在：** Chat 直接把任务交给本机 Codex，并能继续观察、跟进同一个任务。在同一条原生 Codex 上下文中，Chat 可以让 Codex 继续工作、定向纠正、打断执行，并在审阅后验收结果；不再需要手工搬运提示词和结果。对于受控修改，你仍先审阅完整 diff，并保留是否写入的决定权。
+
+```mermaid
+flowchart LR
+    A[Chat 描述目标] --> B[Bridge 选择预登记工作区]
+    B --> C[本机 Codex：只读检查或生成补丁]
+    C --> D[结果回到 Chat]
+    D --> E[人审阅]
+    E -->|精确 APPLY| F[重新校验并受控写入]
+```
+
+以上全部是本机进程通过 MCP/STDIO 建立的连接。Engineering Bridge 不存在 HTTP 端点或云服务。
 
 ## 它是什么？
 
@@ -33,23 +50,6 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **受控修改：** “准备一份补丁来调整超时提示；先展示完整 diff，只有我精确回复 `APPLY` 后才写入。”
 
 受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** Bridge 不会自动测试、stage、commit、push 或发布。
-
-## 以前 / 现在
-
-**以前：** 把项目上下文从 ChatGPT 复制到终端或 Codex，再把命令、diff 和结果搬回去，如此反复。
-
-**现在：** 在兼容的聊天客户端里描述工程目标。Engineering Bridge 选择预登记的本机工作区，让本机 Codex 检查项目或准备补丁，再把结果送回对话。你审阅完整 diff，并保留是否写入的决定权。
-
-```mermaid
-flowchart LR
-    A[Chat 描述目标] --> B[Bridge 选择预登记工作区]
-    B --> C[本机 Codex：只读检查或生成补丁]
-    C --> D[结果回到 Chat]
-    D --> E[人审阅]
-    E -->|精确 APPLY| F[重新校验并受控写入]
-```
-
-以上全部是本机进程通过 MCP/STDIO 建立的连接。Engineering Bridge 不存在 HTTP 端点或云服务。
 
 ## 为什么通过 Chat 控制本地 Agent？
 
