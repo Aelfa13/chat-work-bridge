@@ -6,13 +6,13 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · Local · Continuously tested on macOS.** This is a V1 pre-release candidate, not stable `v1.0.0`, and it does not indicate npm publication. A community user successfully ran the earlier full read-only, patch-generation, `APPLY`, and real-write flow on Windows; `v1.0.0-rc.1` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+[简体中文](README.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · Local · Continuously maintainer-tested on macOS.** This is the V1 Release Candidate (`v1.0.0-rc.1`), not stable `v1.0.0`, and it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.0.0-rc.1` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
 
 ## Before / now
 
 **Before:** you discussed requirements in Chat, manually copied a prompt into Codex, then carried Codex's result back to Chat for the next round—repeating the shuttle each time.
 
-**Now:** Chat hands the task directly to local Codex and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. For controlled changes, you still review the complete diff first and retain the decision to write.
+**Now:** Chat hands the task directly to local Codex and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. The core V1 change over the older one-shot task/result flow is an explicit interactive supervision flow: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`. For controlled changes, you still review the complete diff first and retain the decision to write.
 
 ```mermaid
 flowchart LR
@@ -22,6 +22,8 @@ flowchart LR
     D --> E[Human reviews]
     E -->|exact APPLY| F[Revalidate and write under controls]
 ```
+
+**State boundary:** Bridge owns control state, not session truth. The native Codex thread/session remains the source of execution history; Bridge keeps only the temporary supervision/control state needed for continue, steer, interrupt, and accept. This control state may be lost on Bridge restart by design; V1 does not persist or mirror Codex session history in SQLite, a database, or a transcript mirror.
 
 Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
 
@@ -91,11 +93,11 @@ npm install
 npm run build
 ```
 
-There is no one-click installer in this alpha.
+The V1 RC (`v1.0.0-rc.1`) has no one-click installer.
 
 ### 3. Register a workspace
 
-Create `workspaces.json` with an absolute, normalized project path:
+The V1 RC still requires a pre-registered workspace. Create `workspaces.json` with an absolute, normalized project path:
 
 ```json
 [
@@ -106,7 +108,7 @@ Create `workspaces.json` with an absolute, normalized project path:
 ]
 ```
 
-This file is trusted local configuration. MCP callers can select an ID but cannot create, register, or replace paths. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
+This file is trusted local configuration. MCP callers can select an ID but cannot create, register, or replace paths; V1 does not provide automatic project binding, discovery, or onboarding, so calls still require a registered `workspace_id`. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
 
 ### 4. Configure a STDIO MCP client
 
@@ -127,7 +129,7 @@ Client schemas and configuration locations differ; translate these generic field
 
 Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
 
-Reconnect the integration and confirm these five tools are visible:
+Reconnect the integration and confirm these five current V1 tools are visible:
 
 - `run_task`
 - `task_result`
@@ -139,7 +141,7 @@ Reconnect the integration and confirm these five tools are visible:
 
 > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
 
-Ordinary `run_task` is always read-only and returns a task ID on success. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `control_task` accepts only interactive `run_task` task IDs and state-checks `continue`, `steer`, `interrupt`, and `accept`: `continue` preserves native Codex thread continuity, `interrupt` applies only while an interactive task is running and ends it as failed, and only finalization exposes final `output` or `error` through `task_result`. Verify the workspace yourself:
+Ordinary `run_task` is always read-only and returns a task ID on success. The V1 interactive supervision order is: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`; this is the core V1 change over the older one-shot task/result flow. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `control_task` accepts only interactive `run_task` task IDs: `continue` preserves native Codex thread continuity, `interrupt` applies only while an interactive task is running and ends it as failed, and only finalization exposes final `output` or `error` through `task_result`. Verify the workspace yourself:
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -162,9 +164,9 @@ Enable writing only for the intended workspace:
 ```
 
 1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
-2. Call `generate_controlled_patch` with the workspace ID and a narrow request. It uses the legacy proposal-task path, not the interactive `run_task` control flow.
+2. Call `generate_controlled_patch` with the workspace ID and a narrow request. This is a separate controlled-patch flow, not the interactive `run_task` supervision flow.
 3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
-4. Review every path, the complete diff, and returned `base_head` outside task state. If acceptable, call `apply_controlled_patch` directly with that `patch_task_id` and confirmation exactly equal to `APPLY`.
+4. Outside task state, follow `generate_controlled_patch` → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
 5. Inspect the result:
 
    ```sh
@@ -195,8 +197,8 @@ The process waits for MCP messages on standard input. It is not an interactive s
 - Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
 - Bridge never automatically tests, stages, commits, pushes, or creates a Release.
 - The Codex backend is `codex app-server --stdio`, with no shell, approval `never`, and network disabled. Ordinary/supervisor tasks and proposal generation remain read-only; only exact reviewed `APPLY` is a filesystem write path.
-- State is process-local, with no restart recovery or automatic timeout. Explicit `interrupt` exists only for running interactive tasks.
-- Alpha.4 project binding is not implemented; `workspace_id` remains required.
+- State is process-local, with no restart recovery; V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`.
+- Projects are not automatically bound, discovered, or registered; workspaces must remain pre-registered in `workspaces.json`, and calls still require `workspace_id`.
 - Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
 - A human must review the complete proposal; a requested filename is not a code-enforced semantic allowlist.
 
@@ -209,7 +211,7 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 - **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
 - **Controlled write refused:** check `allow_write`, the Git top-level, existing HEAD, and clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
 - **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
-- **A task never finishes:** there is no automatic timeout. A running interactive task can be explicitly interrupted through `control_task`; other tasks can only be polled, and restarting Bridge discards all in-memory state.
+- **A task never finishes:** V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`; other tasks can continue to be polled, and restarting Bridge discards the temporary control state and other in-memory state by design.
 
 ## Project story
 
