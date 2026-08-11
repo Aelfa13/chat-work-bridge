@@ -1,6 +1,6 @@
 {
   "name": "engineering-bridge",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "description": "A local-first MCP bridge for read-only Codex tasks and opt-in controlled patch application.",
   "type": "module",
   "files": [
