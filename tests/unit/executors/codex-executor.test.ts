@@ -24,6 +24,7 @@ interface Invocation {
 
 interface FakeBehavior {
   appServerOutput?: string;
+  turnError?: { message: string; codexErrorInfo?: string; additionalDetails?: string };
   stdout?: string;
   stderr?: string;
   exitCode?: number;
@@ -53,7 +54,8 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
               stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
               if (message.method === "turn/start" && behavior.autoComplete !== false) {
                 stdout.write(`${JSON.stringify({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: behavior.appServerOutput } } })}\n`);
-                stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } })}\n`);
+                const status = behavior.turnError ? "failed" : "completed";
+                stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status, error: behavior.turnError } } })}\n`);
               }
             });
           }
@@ -201,4 +203,29 @@ test("nonzero exit discards partial output and stderr details", async () => {
   assert.equal(serialized.includes("secret partial"), false);
   assert.equal(serialized.includes("secret stderr"), false);
   assert.equal(serialized.includes("/private/path"), false);
+});
+
+test("reports an allowlisted failed-turn reason without exposing raw error details", async () => {
+  const result = await new CodexExecutor(TRUSTED_CWD, fakeStarter({
+    appServerOutput: "",
+    turnError: {
+      message: "secret upstream message /private/path",
+      codexErrorInfo: "serverOverloaded",
+      additionalDetails: "secret diagnostics"
+    }
+  }, []), {}).execute({ taskId: TASK_ID, instruction: "x" });
+
+  assert.deepEqual(result, {
+    kind: "failed",
+    error: {
+      code: "CODEX_EXECUTION_FAILED",
+      message: "Codex execution failed: the selected model is at capacity."
+    },
+    threadId: "thread-1",
+    evidence: []
+  });
+  const serialized = JSON.stringify(result);
+  assert.equal(serialized.includes("secret upstream message"), false);
+  assert.equal(serialized.includes("/private/path"), false);
+  assert.equal(serialized.includes("secret diagnostics"), false);
 });

@@ -11,6 +11,19 @@ const MAX_TEXT = 16_384;
 function failure(code: "CODEX_UNAVAILABLE" | "CODEX_PROTOCOL_ERROR" | "CODEX_EXECUTION_FAILED"): ExecutorResult {
   return { kind: "failed", error: serializeError(new CoreError(code)) };
 }
+function failedTurn(turn: Record<string, unknown>): ExecutorResult {
+  const error = object(turn.error) ? turn.error : undefined;
+  if (error?.codexErrorInfo === "serverOverloaded") {
+    return {
+      kind: "failed",
+      error: {
+        code: "CODEX_EXECUTION_FAILED",
+        message: "Codex execution failed: the selected model is at capacity."
+      }
+    };
+  }
+  return failure("CODEX_EXECUTION_FAILED");
+}
 function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
@@ -111,7 +124,7 @@ export class CodexExecutor implements Executor {
           const turn = object(message.params.turn) ? message.params.turn : message.params;
           const status = turn.status;
           const common = { threadId: this.threadId, evidence: [...evidence.values()] };
-          if (status === "failed") finish({ ...failure("CODEX_EXECUTION_FAILED"), ...common });
+          if (status === "failed") finish({ ...failedTurn(turn), ...common });
           else if (status === "interrupted") finish({ kind: "interrupted", output, ...common });
           else if (status === "completed") finish({ kind: "completed", output, ...common });
           else finish(failure("CODEX_PROTOCOL_ERROR"));
