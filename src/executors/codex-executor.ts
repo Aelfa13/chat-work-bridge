@@ -22,7 +22,8 @@ function bounded(value: unknown): string { return typeof value === "string" ? va
 export class CodexExecutor implements Executor {
   private child: ChildProcessWithoutNullStreams | undefined;
   private threadId?: string;
-  private turnId?: string;
+  private turnId: string | undefined;
+  private startedTurnId: string | undefined;
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: () => void }>();
 
@@ -30,6 +31,8 @@ export class CodexExecutor implements Executor {
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
+    this.turnId = undefined;
+    this.startedTurnId = undefined;
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.startProcess("codex", ["app-server", "--stdio"], {
@@ -51,7 +54,11 @@ export class CodexExecutor implements Executor {
       for (const waiter of this.pending.values()) waiter.reject();
       this.pending.clear();
       terminal?.(result);
-      if (this.child === child) this.child = undefined;
+      if (this.child === child) {
+        this.child = undefined;
+        this.turnId = undefined;
+        this.startedTurnId = undefined;
+      }
       if (!child.killed) child.kill();
     };
     const unavailable = (): void => finish(failure("CODEX_UNAVAILABLE"));
@@ -76,6 +83,10 @@ export class CodexExecutor implements Executor {
           continue;
         }
         if (typeof message.method !== "string" || !object(message.params)) { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
+        if (message.method === "turn/started") {
+          const turn = object(message.params.turn) ? message.params.turn : message.params;
+          if (message.params.threadId === this.threadId && typeof turn.id === "string" && (!this.turnId || turn.id === this.turnId)) this.startedTurnId = turn.id;
+        }
         const item = object(message.params.item) ? message.params.item : undefined;
         if ((message.method === "item/started" || message.method === "item/completed") && item) {
           if (item.type === "agentMessage") {
@@ -128,17 +139,18 @@ export class CodexExecutor implements Executor {
       const turnResult = await this.call("turn/start", { threadId: this.threadId, input: [{ type: "text", text: request.instruction }], cwd: this.workspaceRoot, approvalPolicy: "never", sandboxPolicy });
       if (!object(turnResult) || !object(turnResult.turn) || typeof turnResult.turn.id !== "string") throw new Error();
       this.turnId = turnResult.turn.id;
+      if (this.startedTurnId !== this.turnId) this.startedTurnId = undefined;
     } catch { if (!settled) finish(failure("CODEX_PROTOCOL_ERROR")); }
     return terminalPromise;
   }
 
   async steer(instruction: string): Promise<void> {
-    if (!this.threadId || !this.turnId) throw new CoreError("INVALID_STATE_TRANSITION");
-    await this.call("turn/steer", { threadId: this.threadId, expectedTurnId: this.turnId, input: [{ type: "text", text: instruction }] });
+    if (!this.threadId || !this.startedTurnId) throw new CoreError("INVALID_STATE_TRANSITION");
+    await this.call("turn/steer", { threadId: this.threadId, expectedTurnId: this.startedTurnId, input: [{ type: "text", text: instruction }] });
   }
   async interrupt(): Promise<void> {
-    if (!this.threadId || !this.turnId) throw new CoreError("INVALID_STATE_TRANSITION");
-    await this.call("turn/interrupt", { threadId: this.threadId, turnId: this.turnId });
+    if (!this.threadId || !this.startedTurnId) throw new CoreError("INVALID_STATE_TRANSITION");
+    await this.call("turn/interrupt", { threadId: this.threadId, turnId: this.startedTurnId });
   }
   private call(method: string, params: unknown): Promise<unknown> {
     const id = this.nextId++;

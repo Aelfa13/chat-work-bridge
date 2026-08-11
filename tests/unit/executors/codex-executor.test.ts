@@ -4,6 +4,7 @@ import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
+import { CoreError } from "../../../src/core/errors.js";
 import { isId } from "../../../src/core/ids.js";
 import { CodexExecutor } from "../../../src/executors/codex-executor.js";
 import type { ProcessStarter } from "../../../src/executors/codex-executor.js";
@@ -18,6 +19,7 @@ interface Invocation {
   args: readonly string[];
   options: SpawnOptionsWithoutStdio;
   stdin: string;
+  send(message: unknown): void;
 }
 
 interface FakeBehavior {
@@ -26,6 +28,7 @@ interface FakeBehavior {
   stderr?: string;
   exitCode?: number;
   processError?: boolean;
+  autoComplete?: boolean;
 }
 
 function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): ProcessStarter {
@@ -33,7 +36,10 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
     const child = new EventEmitter();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
-    const invocation: Invocation = { executable, args: [...args], options, stdin: "" };
+    const invocation: Invocation = {
+      executable, args: [...args], options, stdin: "",
+      send(message) { stdout.write(`${JSON.stringify(message)}\n`); }
+    };
     const stdin = new Writable({
       write(chunk, _encoding, callback) {
         invocation.stdin += chunk.toString();
@@ -45,7 +51,7 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
             if (message.method === "turn/start") result = { turn: { id: "turn-1" } };
             queueMicrotask(() => {
               stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
-              if (message.method === "turn/start") {
+              if (message.method === "turn/start" && behavior.autoComplete !== false) {
                 stdout.write(`${JSON.stringify({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: behavior.appServerOutput } } })}\n`);
                 stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } })}\n`);
               }
@@ -114,6 +120,39 @@ test("uses the fixed safe invocation and returns agent text", async () => {
   assert.deepEqual(messages[2], { id: 2, method: "thread/start", params: { cwd: TRUSTED_CWD, approvalPolicy: "never", sandbox: "read-only" } });
   assert.deepEqual(messages[3], { id: 3, method: "turn/start", params: { threadId: "thread-1", input: [{ type: "text", text: instruction }], cwd: TRUSTED_CWD, approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
   assert.equal(invocation.args.includes(instruction), false);
+});
+
+test("controls require turn/started readiness and reset between turns", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+
+  const firstExecution = executor.execute({ taskId: TASK_ID, instruction: "first" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await assert.rejects(executor.steer("too soon"), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  await assert.rejects(executor.interrupt(), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/steer"'), false);
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/interrupt"'), false);
+
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "other-turn", status: "inProgress" } } });
+  await assert.rejects(executor.interrupt(), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/interrupt"'), false);
+
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } } });
+  await executor.steer("continue");
+  await executor.interrupt();
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/steer"'), true);
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/interrupt"'), true);
+
+  invocations[0]?.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  await firstExecution;
+  await assert.rejects(executor.interrupt(), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+
+  const secondExecution = executor.execute({ taskId: TASK_ID, threadId: "thread-1", instruction: "second" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await assert.rejects(executor.steer("too soon again"), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  assert.equal(invocations[1]?.stdin.includes('"method":"turn/steer"'), false);
+  invocations[1]?.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  await secondExecution;
 });
 
 test("maps a thrown spawn and a process error to unavailable", async () => {
