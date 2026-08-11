@@ -2,19 +2,43 @@
 
 **让 Chat 成为工程控制台，让本地 Codex 做执行者：先看补丁，再决定是否写入。**
 
-![1.0.0 candidate](https://img.shields.io/badge/release-1.0.0%20candidate-blue)
+[![Pre-release v1.0.0-rc.1](https://img.shields.io/badge/pre--release-v1.0.0--rc.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **V1 / 1.0.0 候选版 · Alpha · 本地运行 · macOS 持续实测 · 已有 Windows 用户完整跑通。** 这只是候选版说明，不表示已经存在 `v1.0.0` tag、GitHub Release 或 npm 发布。已有社区用户在 Windows 上实际使用了只读、补丁生成、`APPLY` 与真实写入完整流程；不同本地环境可能需要少量配置调整，这不等同于维护者完成了正式 Windows 兼容性验收。
+[English](README.en.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · 本地运行 · macOS 持续实测。** 这是 V1 的预发布候选版本，不是稳定版 `v1.0.0`，也不表示已发布到 npm。早期版本已有社区用户在 Windows 上实际跑通只读、补丁生成、`APPLY` 与真实写入的完整流程；`v1.0.0-rc.1` 仍需外部 Windows 与多客户端验证，不等同于维护者认证 Windows 兼容。
+
+## 它是什么？
+
+Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。你在兼容的聊天客户端里说清楚想了解或修改什么，它把任务交给本机 Codex CLI，在预先登记的项目中检查代码，再把分析结果或补丁带回对话。
+
+它适合希望借助对话理解和审阅代码的人，也适合需要保留明确写入控制的开发者。你不必先会读协议文档，但仍需要完成一次 Node.js、Git、Codex CLI 和 MCP 客户端配置；仅有普通浏览器聊天无法直接使用它。
+
+## 为什么需要一座桥？
+
+普通聊天不能天然读取你电脑上的项目，也不能启动本机 Codex。Engineering Bridge 在两者之间提供一个本地、预登记且受范围限制的入口，让对话负责理解目标，本机 Codex 负责查看真实代码，Bridge 负责传递任务并守住边界。
+
+这里有四个角色：
+
+- **聊天客户端：** 理解你的要求、调用工具，并把结果显示在对话中；它必须支持启动本地 STDIO MCP 服务。
+- **Engineering Bridge：** 把 `workspace_id` 映射到可信本机配置中的项目路径，启动并跟踪任务，校验受控补丁。
+- **本机 Codex：** 当前通过 `codex app-server --stdio` 运行，在登记的工作区中进行只读检查或准备补丁。
+- **MCP-STDIO：** 客户端与 Bridge 之间的本地协议和进程连接；没有 HTTP 端点或云服务。
+
+## 今天可以做什么？
+
+- **只读分析：** “概括这个项目的重要目录和主要模块，不要修改文件。”
+- **代码定位：** “登录逻辑在哪里实现？请解释调用流程。”
+- **代码审阅：** “检查这段实现的可靠性风险，并给出依据，不要编辑文件。”
+- **受控修改：** “准备一份补丁来调整超时提示；先展示完整 diff，只有我精确回复 `APPLY` 后才写入。”
+
+受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** Bridge 不会自动测试、stage、commit、push 或发布。
 
 ## 以前 / 现在
 
 **以前：** 把项目上下文从 ChatGPT 复制到终端或 Codex，再把命令、diff 和结果搬回去，如此反复。
 
 **现在：** 在兼容的聊天客户端里描述工程目标。Engineering Bridge 选择预登记的本机工作区，让本机 Codex 检查项目或准备补丁，再把结果送回对话。你审阅完整 diff，并保留是否写入的决定权。
-
-普通浏览器聊天不能天然访问你电脑上的项目，也不能启动 Codex CLI。客户端必须支持启动本地配置的 STDIO MCP 服务。
 
 ```mermaid
 flowchart LR

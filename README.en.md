@@ -2,19 +2,43 @@
 
 **Turn chat into an engineering console and local Codex into the executor: see the patch first, then decide whether it may be written.**
 
-![1.0.0 candidate](https://img.shields.io/badge/release-1.0.0%20candidate-blue)
+[![Pre-release v1.0.0-rc.1](https://img.shields.io/badge/pre--release-v1.0.0--rc.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **V1 / 1.0.0 candidate · Alpha · Local · Maintainer-tested on macOS · Full workflow successfully used on Windows.** This is a candidate description only; it does not claim a `v1.0.0` tag, GitHub Release, or npm publication. A community Windows user has successfully used the read-only, patch proposal, `APPLY`, and real-write flow; minor local adjustments may be needed, and this is not formal maintainer-certified Windows compatibility.
+[简体中文](README.md) · **[v1.0.0-rc.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.1) · V1 Release Candidate / Pre-release · Local · Continuously tested on macOS.** This is a V1 pre-release candidate, not stable `v1.0.0`, and it does not indicate npm publication. A community user successfully ran the earlier full read-only, patch-generation, `APPLY`, and real-write flow on Windows; `v1.0.0-rc.1` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+
+## What is it?
+
+Engineering Bridge is a small “engineering bridge” that runs on your computer. You describe what you want to understand or change in a compatible chat client; it hands the task to local Codex CLI, lets Codex inspect a pre-registered project, and brings the analysis or patch back into the conversation.
+
+It is for people who want conversational help understanding and reviewing code, as well as developers who want explicit control over writes. You do not need to read a protocol specification first, but you do need to configure Node.js, Git, Codex CLI, and an MCP client once. A browser-only chat cannot use it directly.
+
+## Why is a bridge needed?
+
+A normal chat cannot inherently read projects on your computer or launch local Codex. Engineering Bridge provides a local, pre-registered, scope-limited entry point between them: the conversation understands the goal, local Codex examines the real code, and Bridge carries the task while enforcing boundaries.
+
+There are four roles:
+
+- **Chat client:** understands your request, calls tools, and displays results in the conversation; it must be able to launch a local STDIO MCP server.
+- **Engineering Bridge:** maps a `workspace_id` to a project path in trusted local configuration, starts and tracks tasks, and validates controlled patches.
+- **Local Codex:** currently runs through `codex app-server --stdio` to inspect a registered workspace read-only or prepare a patch.
+- **MCP-STDIO:** the local protocol and process connection between the client and Bridge; there is no HTTP endpoint or cloud service.
+
+## What can it do today?
+
+- **Read-only analysis:** “Summarize the important directories and main modules in this project without changing files.”
+- **Code location:** “Where is login implemented? Explain the call flow.”
+- **Code review:** “Review this implementation for reliability risks and show your evidence without editing files.”
+- **Controlled change:** “Prepare a patch that adjusts the timeout message; show the complete diff first, and write only after my exact `APPLY`.”
+
+The controlled-write rule is simple: **show the diff first, write only after exact `APPLY`.** Bridge does not automatically test, stage, commit, push, or release.
 
 ## Before / now
 
 **Before:** copy project context from ChatGPT to a terminal or Codex, then carry commands, diffs, and results back—repeatedly.
 
 **Now:** describe the engineering goal in a compatible chat client. Engineering Bridge selects a pre-registered local workspace, asks local Codex to inspect it or prepare a patch, and returns the result to the conversation. You review the full diff and retain the decision to write.
-
-A normal browser chat cannot inherently access projects on your computer or launch Codex CLI. The client must support starting a locally configured STDIO MCP server.
 
 ```mermaid
 flowchart LR
