@@ -82,8 +82,8 @@ export class ControlledPatchService {
         const indexEntry = await this.git(proposal.workspaceRoot, ["ls-files", "--stage", "--", target.path]);
         if (indexEntry.length !== 0 || await pathExists(resolve(proposal.workspaceRoot, target.path))) failPatch();
       }
-      await this.git(proposal.workspaceRoot, ["apply", "--check"], result.output);
-      await this.git(proposal.workspaceRoot, ["apply"], result.output);
+      await this.git(proposal.workspaceRoot, ["apply", "--check", "--recount", "--unidiff-zero"], result.output);
+      await this.git(proposal.workspaceRoot, ["apply", "--recount", "--unidiff-zero"], result.output);
       proposal.state = "applied";
       return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
     } catch (error) {
@@ -142,7 +142,7 @@ function normalizeTrailingLf(output: string): string {
 type PatchTarget = { path: string; kind: "modified" | "added" };
 
 function parsePatch(patch: string): PatchTarget[] {
-  if (!patch.startsWith("diff --git ") || patch.includes("```") || patch.includes("GIT binary patch") ||
+  if (!patch.startsWith("diff --git ") || patch.includes("GIT binary patch") ||
       patch.includes("Binary files ") || /^(old mode|new mode|deleted file mode|similarity index|rename (from|to)|copy (from|to)) /mu.test(patch)) {
     throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
   }

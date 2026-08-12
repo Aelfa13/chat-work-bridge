@@ -69,6 +69,44 @@ index 0000000..3e75765
 +added
 `;
 
+const markdownFencePatch = [
+  "diff --git a/README.md b/README.md",
+  "--- a/README.md",
+  "+++ b/README.md",
+  "@@ -1,7 +1,7 @@",
+  " # Example",
+  " ",
+  " ```sh",
+  " echo ok",
+  " ```",
+  " ",
+  "-before",
+  "+after",
+  ""
+].join("\n");
+
+const staleHunkCountPatch = [
+  "diff --git a/README.md b/README.md",
+  "--- a/README.md",
+  "+++ b/README.md",
+  "@@ -4,7 +4,7 @@ echo ok",
+  " ```",
+  " ",
+  "-before",
+  "+after",
+  ""
+].join("\n");
+
+const zeroContextPatch = [
+  "diff --git a/README.md b/README.md",
+  "--- a/README.md",
+  "+++ b/README.md",
+  "@@ -7 +7 @@",
+  "-before",
+  "+after",
+  ""
+].join("\n");
+
 test("generation records base metadata, binds the task, and keeps Codex instruction read-only", async () => {
   const root = repository();
   let instruction = "";
@@ -90,7 +128,10 @@ test("generation records base metadata, binds the task, and keeps Codex instruct
   assert.deepEqual(applied.changed_paths, ["note.txt"]);
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
   assert.ok(gitCalls.every((call) => call.executable === "git" && call.shell === false));
-  assert.deepEqual(gitCalls.slice(-2).map((call) => call.args), [["apply", "--check"], ["apply"]]);
+  assert.deepEqual(gitCalls.slice(-2).map((call) => call.args), [
+    ["apply", "--check", "--recount", "--unidiff-zero"],
+    ["apply", "--recount", "--unidiff-zero"]
+  ]);
   await expectCode(
     () => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }),
     "INVALID_STATE_TRANSITION"
@@ -160,6 +201,51 @@ test("stores and applies a controlled patch normalized to one trailing LF", asyn
   });
   await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("applies a valid patch when Markdown context contains fenced code", async () => {
+  const root = repository();
+  writeFileSync(join(root, "README.md"), "# Example\n\n```sh\necho ok\n```\n\nbefore\n");
+  git(root, "add", "README.md");
+  git(root, "commit", "-qm", "add Markdown fixture");
+  const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: markdownFencePatch }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change Markdown" });
+  await terminal(tasks, generated.taskId);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["README.md"]);
+  assert.equal(readFileSync(join(root, "README.md"), "utf8"), "# Example\n\n```sh\necho ok\n```\n\nafter\n");
+});
+
+test("recounts stale hunk line counts in a valid generated patch", async () => {
+  const root = repository();
+  writeFileSync(join(root, "README.md"), "# Example\n\n```sh\necho ok\n```\n\nbefore\n");
+  git(root, "add", "README.md");
+  git(root, "commit", "-qm", "add generated patch fixture");
+  const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: staleHunkCountPatch }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change generated patch" });
+  await terminal(tasks, generated.taskId);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["README.md"]);
+  assert.equal(readFileSync(join(root, "README.md"), "utf8"), "# Example\n\n```sh\necho ok\n```\n\nafter\n");
+});
+
+test("applies a valid generated patch with zero context", async () => {
+  const root = repository();
+  writeFileSync(join(root, "README.md"), "# Example\n\n```sh\necho ok\n```\n\nbefore\ntail\n");
+  git(root, "add", "README.md");
+  git(root, "commit", "-qm", "add zero-context fixture");
+  const { controlled, tasks } = fixture(root, async () => ({ kind: "completed", output: zeroContextPatch }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change one line" });
+  await terminal(tasks, generated.taskId);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["README.md"]);
+  assert.equal(readFileSync(join(root, "README.md"), "utf8"), "# Example\n\n```sh\necho ok\n```\n\nafter\ntail\n");
 });
 
 test("adds an absent 100644 text file", async () => {
