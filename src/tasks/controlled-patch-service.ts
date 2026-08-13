@@ -21,6 +21,8 @@ type Proposal = {
   state: "proposed" | "applying" | "applied";
 };
 
+const MAX_APPLIED_PROPOSAL_HISTORY = 100;
+
 const PATCH_INSTRUCTION = (changeRequest: string): string => `You are preparing a proposed change for human review. The workspace is read-only.
 Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.
 
@@ -29,6 +31,7 @@ ${changeRequest}`;
 
 export class ControlledPatchService {
   private readonly proposals = new Map<Id, Proposal>();
+  private appliedProposalTaskIds: Id[] = [];
 
   constructor(
     private readonly registry: RegisteredWorkspaceRegistry,
@@ -42,13 +45,19 @@ export class ControlledPatchService {
     const { taskId } = this.tasks.runTask({
       workspace_id: request.workspace_id,
       instruction: PATCH_INSTRUCTION(request.change_request)
-    }, normalizeTrailingLf);
+    }, normalizeTrailingLf, (result) => {
+      if (result.state === "failed") {
+        this.proposals.delete(result.id);
+        this.tasks.unpinTask(result.id);
+      }
+    });
     this.proposals.set(taskId, {
       workspaceId: request.workspace_id,
       workspaceRoot,
       baseHead,
       state: "proposed"
     });
+    this.tasks.pinTask(taskId);
     return { taskId, baseHead };
   }
 
@@ -85,11 +94,26 @@ export class ControlledPatchService {
       await this.git(proposal.workspaceRoot, ["apply", "--check", "--recount", "--unidiff-zero"], result.output);
       await this.git(proposal.workspaceRoot, ["apply", "--recount", "--unidiff-zero"], result.output);
       proposal.state = "applied";
+      this.appliedProposalTaskIds.push(request.patch_task_id as Id);
+      this.trimAppliedProposals();
+      this.tasks.unpinTask(request.patch_task_id as Id);
       return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
     } catch (error) {
       proposal.state = "proposed";
       throw error;
     }
+  }
+
+  private trimAppliedProposals(): void {
+    const appliedTaskIds = this.appliedProposalTaskIds.filter(
+      (taskId) => this.proposals.get(taskId)?.state === "applied"
+    );
+    const evictedTaskIds = appliedTaskIds.slice(
+      0,
+      Math.max(0, appliedTaskIds.length - MAX_APPLIED_PROPOSAL_HISTORY)
+    );
+    for (const taskId of evictedTaskIds) this.proposals.delete(taskId);
+    this.appliedProposalTaskIds = appliedTaskIds.slice(-MAX_APPLIED_PROPOSAL_HISTORY);
   }
 
   private async verifyWorkspace(workspaceRoot: string): Promise<string> {

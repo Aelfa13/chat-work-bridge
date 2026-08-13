@@ -43,8 +43,14 @@ type TaskRecord =
   | { state: "queued" | "running" }
   | { state: "completed" | "failed"; result: RegisteredWorkspaceTaskResult };
 
+const MAX_TERMINAL_TASK_HISTORY = 100;
+
+export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void;
+
 export class RegisteredWorkspaceTaskService {
   private readonly tasks = new Map<Id, TaskRecord>();
+  private readonly pinnedTaskIds = new Set<Id>();
+  private legacyTerminalTaskIds: Id[] = [];
 
   constructor(
     private readonly registry: RegisteredWorkspaceRegistry,
@@ -53,12 +59,22 @@ export class RegisteredWorkspaceTaskService {
 
   runTask(
     request: RegisteredWorkspaceTaskRequest,
-    completedOutputTransform?: CompletedOutputTransform
+    completedOutputTransform?: CompletedOutputTransform,
+    terminalTaskHandler?: TerminalTaskHandler
   ): { taskId: Id } {
     const taskId = newId();
     this.tasks.set(taskId, { state: "queued" });
-    queueMicrotask(() => void this.run(taskId, request, completedOutputTransform));
+    queueMicrotask(() => void this.run(taskId, request, completedOutputTransform, terminalTaskHandler));
     return { taskId };
+  }
+
+  pinTask(taskId: Id): void {
+    this.pinnedTaskIds.add(taskId);
+  }
+
+  unpinTask(taskId: Id): void {
+    this.pinnedTaskIds.delete(taskId);
+    this.trimLegacyTerminalTasks();
   }
 
   status(taskId: unknown): { taskId: Id; state: RegisteredWorkspaceTaskState } | undefined {
@@ -107,6 +123,8 @@ export class RegisteredWorkspaceTaskService {
     if (action === "accept") {
       if (record.state !== "waiting_for_supervisor_review") throw new CoreError("INVALID_STATE_TRANSITION");
       record.state = "completed";
+      this.interactiveTerminalTaskIds.push(taskId);
+      this.trimInteractiveTerminalTasks();
     } else if (action === "continue") {
       if (record.state !== "waiting_for_supervisor_review" || !instruction?.trim()) throw new CoreError("INVALID_STATE_TRANSITION");
       record.request = { ...record.request, instruction };
@@ -126,6 +144,7 @@ export class RegisteredWorkspaceTaskService {
     state: ControlledTaskState; request: RegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
     executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined; error?: SerializedError | undefined;
   }>();
+  private interactiveTerminalTaskIds: Id[] = [];
 
   private async executeInteractive(taskId: Id): Promise<void> {
     const record = this.interactive.get(taskId);
@@ -143,19 +162,24 @@ export class RegisteredWorkspaceTaskService {
       record.evidence = result.evidence ?? record.evidence;
       if (result.kind === "failed") { record.state = "failed"; record.error = result.error; }
       else if (result.kind === "interrupted") {
-        record.state = "failed";
         record.output = undefined;
+        record.state = "failed";
         record.error = serializeError(new CoreError("CODEX_EXECUTION_FAILED"));
       } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
+      if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
-      record.executor = undefined; record.state = "failed"; record.error = serializeError(error);
+      record.executor = undefined;
+      record.state = "failed";
+      record.error = serializeError(error);
+      this.recordInteractiveTerminalTask(taskId);
     }
   }
 
   private async run(
     taskId: Id,
     request: RegisteredWorkspaceTaskRequest,
-    completedOutputTransform?: CompletedOutputTransform
+    completedOutputTransform?: CompletedOutputTransform,
+    terminalTaskHandler?: TerminalTaskHandler
   ): Promise<void> {
     this.tasks.set(taskId, { state: "running" });
     try {
@@ -173,14 +197,57 @@ export class RegisteredWorkspaceTaskService {
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
           : { id: taskId, state: "failed", error: serializeError(new CoreError("CODEX_EXECUTION_FAILED")) };
-      this.tasks.set(taskId, { state: taskResult.state, result: taskResult });
+      this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {
         id: taskId,
         state: "failed",
         error: serializeError(error)
       };
-      this.tasks.set(taskId, { state: "failed", result });
+      this.recordLegacyTerminalTask(taskId, result, terminalTaskHandler);
     }
+  }
+
+  private recordLegacyTerminalTask(
+    taskId: Id,
+    result: RegisteredWorkspaceTaskResult,
+    terminalTaskHandler?: TerminalTaskHandler
+  ): void {
+    this.tasks.set(taskId, { state: result.state, result });
+    this.legacyTerminalTaskIds.push(taskId);
+    this.trimLegacyTerminalTasks();
+    terminalTaskHandler?.(result);
+  }
+
+  private recordInteractiveTerminalTask(taskId: Id): void {
+    this.interactiveTerminalTaskIds.push(taskId);
+    this.trimInteractiveTerminalTasks();
+  }
+
+  private trimLegacyTerminalTasks(): void {
+    const terminalTaskIds = this.legacyTerminalTaskIds.filter((taskId) => {
+      const task = this.tasks.get(taskId);
+      return task?.state === "completed" || task?.state === "failed";
+    });
+    const unpinnedTaskIds = terminalTaskIds.filter((taskId) => !this.pinnedTaskIds.has(taskId));
+    const evictedTaskIds = new Set(unpinnedTaskIds.slice(
+      0,
+      Math.max(0, unpinnedTaskIds.length - MAX_TERMINAL_TASK_HISTORY)
+    ));
+    for (const taskId of evictedTaskIds) this.tasks.delete(taskId);
+    this.legacyTerminalTaskIds = terminalTaskIds.filter((taskId) => !evictedTaskIds.has(taskId));
+  }
+
+  private trimInteractiveTerminalTasks(): void {
+    const terminalTaskIds = this.interactiveTerminalTaskIds.filter((taskId) => {
+      const task = this.interactive.get(taskId);
+      return task?.state === "completed" || task?.state === "failed";
+    });
+    const evictedTaskIds = new Set(terminalTaskIds.slice(
+      0,
+      Math.max(0, terminalTaskIds.length - MAX_TERMINAL_TASK_HISTORY)
+    ));
+    for (const taskId of evictedTaskIds) this.interactive.delete(taskId);
+    this.interactiveTerminalTaskIds = terminalTaskIds.filter((taskId) => !evictedTaskIds.has(taskId));
   }
 }
