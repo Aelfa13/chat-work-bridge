@@ -96,8 +96,12 @@ async function main(): Promise<void> {
       change_request: z.string().min(1)
     }
   }, async ({ workspace_id, change_request }) => {
-    const proposal = await controlledPatches.generate({ workspace_id, change_request });
-    return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
+    try {
+      const proposal = await controlledPatches.generate({ workspace_id, change_request });
+      return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
   });
 
   server.registerTool("apply_controlled_patch", {
