@@ -374,3 +374,35 @@ test("rejects dirty workspaces, changed HEAD, and malformed or out-of-scope patc
   git(root, "commit", "-qm", "move head");
   await expectCode(() => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }), "WORKSPACE_PRECONDITION_FAILED");
 });
+
+test("bounds applied proposal history without evicting live proposed or applying proposals", async () => {
+  const root = repository();
+  let next = 0;
+  const { controlled, tasks } = fixture(root, async () => {
+    const path = `added-${next++}.txt`;
+    return { kind: "completed", output: additionPatch.replaceAll("added.txt", path) };
+  });
+  const appliedTaskIds: string[] = [];
+
+  for (let index = 0; index < 101; index += 1) {
+    const proposal = await controlled.generate({ workspace_id: "workspace", change_request: "add file" });
+    await terminal(tasks, proposal.taskId);
+    await controlled.apply({ patch_task_id: proposal.taskId, confirmation: "APPLY" });
+    appliedTaskIds.push(proposal.taskId);
+    git(root, "add", ".");
+    git(root, "commit", "-qm", `apply ${index}`);
+  }
+
+  const proposals = (controlled as unknown as { proposals: Map<string, { state: string }> }).proposals;
+  assert.equal(proposals.has(appliedTaskIds[0]!), false);
+  for (const taskId of appliedTaskIds.slice(1)) assert.equal(proposals.get(taskId)?.state, "applied");
+
+  const live = await controlled.generate({ workspace_id: "workspace", change_request: "add live file" });
+  const applying = await controlled.generate({ workspace_id: "workspace", change_request: "add applying file" });
+  proposals.get(applying.taskId)!.state = "applying";
+  assert.equal(proposals.size, 102);
+
+  await terminal(tasks, live.taskId);
+  assert.equal((await controlled.apply({ patch_task_id: live.taskId, confirmation: "APPLY" })).applied, true);
+  assert.equal(proposals.get(applying.taskId)?.state, "applying");
+});
