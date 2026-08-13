@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { CoreError, serializeError } from "../core/errors.js";
+import { VERSION } from "../version.js";
 import type { Executor, ExecutorEvidence, ExecutorRequest, ExecutorResult } from "./executor.js";
 
 export type ProcessStarter = (executable: string, args: readonly string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
@@ -138,7 +139,7 @@ export class CodexExecutor implements Executor {
     });
 
     try {
-      await this.call("initialize", { clientInfo: { name: "engineering-bridge", version: "1.0.0" } });
+      await this.call("initialize", { clientInfo: { name: "engineering-bridge", version: VERSION } });
       this.notify("initialized", {});
       const sandbox = request.sandbox ?? "read-only";
       const threadParams: Record<string, unknown> = { cwd: this.workspaceRoot, approvalPolicy: "never", sandbox };
