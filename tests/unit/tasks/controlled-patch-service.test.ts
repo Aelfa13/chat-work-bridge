@@ -351,6 +351,19 @@ test("requires exact confirmation and a successfully completed generation task",
   await expectCode(() => controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }), "INVALID_STATE_TRANSITION");
 });
 
+test("removes a proposal when its controlled patch generation task fails", async () => {
+  const root = repository();
+  const { controlled, tasks } = fixture(root, async () => ({
+    kind: "failed",
+    error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
+  }));
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change" });
+  await terminal(tasks, generated.taskId);
+
+  const proposals = (controlled as unknown as { proposals: Map<string, { state: string }> }).proposals;
+  assert.equal(proposals.has(generated.taskId), false);
+});
+
 test("rejects dirty workspaces, changed HEAD, and malformed or out-of-scope patches", async () => {
   const dirtyRoot = repository();
   writeFileSync(join(dirtyRoot, "note.txt"), "dirty\n");
