@@ -138,6 +138,78 @@ test("generation records base metadata, binds the task, and keeps Codex instruct
   );
 });
 
+test("refines a complete multi-file proposal without changing its source and applies the complete replacement", async () => {
+  const root = repository();
+  const sourcePatch = `${validPatch}${additionPatch}`;
+  const refinedPatch = sourcePatch
+    .replace("+after\n", "+refined\n")
+    .replace("+added\n", "+refined added\n");
+  const instructions: string[] = [];
+  const { controlled, tasks } = fixture(root, async (request) => {
+    instructions.push(request.instruction);
+    return { kind: "completed", output: instructions.length === 1 ? sourcePatch : refinedPatch };
+  });
+
+  const source = await controlled.generate({ workspace_id: "workspace", change_request: "implement original multi-file change" });
+  await terminal(tasks, source.taskId);
+  const sourceResult = tasks.result(source.taskId);
+  const refined = await controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "fix note wording"
+  });
+  await terminal(tasks, refined.taskId);
+
+  assert.notEqual(refined.taskId, source.taskId);
+  assert.equal(refined.baseHead, source.baseHead);
+  const refinementInstruction = instructions[1]!;
+  assert.ok(refinementInstruction.includes(sourcePatch));
+  assert.match(refinementInstruction, /Treat the source proposal below as the reviewed baseline/);
+  assert.match(refinementInstruction, /Fix only the requested issues and preserve all unrelated proposal semantics/);
+  assert.match(refinementInstruction, /COMPLETE final unified diff relative to the SAME original base_head/);
+  assert.match(refinementInstruction, /not an incremental patch against the source proposal/);
+  assert.doesNotMatch(refinementInstruction, /implement original multi-file change/);
+  assert.deepEqual(tasks.result(source.taskId), sourceResult);
+
+  const applied = await controlled.apply({ patch_task_id: refined.taskId, confirmation: "APPLY" });
+  assert.deepEqual(applied.changed_paths, ["note.txt", "added.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "refined\n");
+  assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "refined added\n");
+});
+
+test("rejects missing, non-completed, and HEAD-drifted refinement sources without starting Codex", async () => {
+  const root = repository();
+  let finish!: (result: ExecutorResult) => void;
+  const pending = new Promise<ExecutorResult>((done) => { finish = done; });
+  let executions = 0;
+  const { controlled, tasks } = fixture(root, () => {
+    executions += 1;
+    return pending;
+  });
+  const source = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  await Promise.resolve();
+
+  await expectCode(() => controlled.refine({
+    patch_task_id: "missing",
+    change_request: "refine"
+  }), "INVALID_STATE_TRANSITION");
+  await expectCode(() => controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "refine"
+  }), "INVALID_STATE_TRANSITION");
+  assert.equal(executions, 1);
+
+  finish({ kind: "completed", output: validPatch });
+  await terminal(tasks, source.taskId);
+  writeFileSync(join(root, "other.txt"), "commit\n");
+  git(root, "add", "other.txt");
+  git(root, "commit", "-qm", "move head");
+  await expectCode(() => controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "refine"
+  }), "WORKSPACE_PRECONDITION_FAILED");
+  assert.equal(executions, 1);
+});
+
 test("accepts a normal absolute Git top-level path", async () => {
   const root = repository();
   const { controlled } = fixture(root, async () => ({ kind: "completed", output: validPatch }));

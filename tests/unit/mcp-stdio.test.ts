@@ -39,6 +39,7 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       "apply_controlled_patch",
       "control_task",
       "generate_controlled_patch",
+      "refine_controlled_patch",
       "run_task",
       "task_result"
     ]);
@@ -57,6 +58,23 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       error: {
         code: "UNKNOWN_WORKSPACE",
         message: "The requested workspace is not registered."
+      }
+    });
+
+    const refinementResult = await client.callTool({
+      name: "refine_controlled_patch",
+      arguments: { patch_task_id: "missing", change_request: "refine nothing" }
+    });
+    assert.equal(refinementResult.isError, true);
+    const refinementResultContent = refinementResult.content;
+    assert.ok(Array.isArray(refinementResultContent));
+    const refinementContent = refinementResultContent[0] as { type?: string; text?: string } | undefined;
+    assert.equal(refinementContent?.type, "text");
+    if (refinementContent?.type !== "text" || typeof refinementContent.text !== "string") return;
+    assert.deepEqual(JSON.parse(refinementContent.text), {
+      error: {
+        code: "INVALID_STATE_TRANSITION",
+        message: "The requested state transition is not allowed."
       }
     });
   } finally {

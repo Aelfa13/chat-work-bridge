@@ -29,6 +29,17 @@ Return only a unified textual Git diff for the requested change, beginning with 
 Change request:
 ${changeRequest}`;
 
+const REFINEMENT_INSTRUCTION = (baseHead: string, sourceDiff: string, changeRequest: string): string => `You are refining a proposed change for human review. The workspace is read-only.
+Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.
+
+Treat the source proposal below as the reviewed baseline. Fix only the requested issues and preserve all unrelated proposal semantics. Output a COMPLETE final unified diff relative to the SAME original base_head ${baseHead}, not an incremental patch against the source proposal. Do not redo the original task.
+
+Complete source proposal diff:
+${sourceDiff}
+
+Refinement request:
+${changeRequest}`;
+
 export class ControlledPatchService {
   private readonly proposals = new Map<Id, Proposal>();
   private appliedProposalTaskIds: Id[] = [];
@@ -42,23 +53,20 @@ export class ControlledPatchService {
   async generate(request: { workspace_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string }> {
     const workspaceRoot = this.registry.resolveWritable(request.workspace_id);
     const baseHead = await this.verifyWorkspace(workspaceRoot);
-    const { taskId } = this.tasks.runTask({
-      workspace_id: request.workspace_id,
-      instruction: PATCH_INSTRUCTION(request.change_request)
-    }, normalizeTrailingLf, (result) => {
-      if (result.state === "failed") {
-        this.proposals.delete(result.id);
-        this.tasks.unpinTask(result.id);
-      }
-    });
-    this.proposals.set(taskId, {
-      workspaceId: request.workspace_id,
-      workspaceRoot,
-      baseHead,
-      state: "proposed"
-    });
-    this.tasks.pinTask(taskId);
-    return { taskId, baseHead };
+    return this.startProposal(request.workspace_id, workspaceRoot, baseHead, PATCH_INSTRUCTION(request.change_request));
+  }
+
+  async refine(request: { patch_task_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string }> {
+    const proposal = this.proposals.get(request.patch_task_id as Id);
+    const sourceResult = this.tasks.result(request.patch_task_id);
+    if (proposal === undefined || sourceResult === undefined || sourceResult.state !== "completed") {
+      throw new CoreError("INVALID_STATE_TRANSITION");
+    }
+
+    const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
+    if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    return this.startProposal(proposal.workspaceId, proposal.workspaceRoot, proposal.baseHead,
+      REFINEMENT_INSTRUCTION(proposal.baseHead, sourceResult.output, request.change_request));
   }
 
   async apply(request: { patch_task_id: string; confirmation: string }): Promise<{
@@ -102,6 +110,28 @@ export class ControlledPatchService {
       proposal.state = "proposed";
       throw error;
     }
+  }
+
+  private startProposal(
+    workspaceId: string, workspaceRoot: string, baseHead: string, instruction: string
+  ): { taskId: Id; baseHead: string } {
+    const { taskId } = this.tasks.runTask({
+      workspace_id: workspaceId,
+      instruction
+    }, normalizeTrailingLf, (result) => {
+      if (result.state === "failed") {
+        this.proposals.delete(result.id);
+        this.tasks.unpinTask(result.id);
+      }
+    });
+    this.proposals.set(taskId, {
+      workspaceId,
+      workspaceRoot,
+      baseHead,
+      state: "proposed"
+    });
+    this.tasks.pinTask(taskId);
+    return { taskId, baseHead };
   }
 
   private trimAppliedProposals(): void {

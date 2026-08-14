@@ -129,12 +129,13 @@ Client schemas and configuration locations differ; translate these generic field
 
 Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
 
-Reconnect the integration and confirm these five current V1 tools are visible:
+Reconnect the integration and confirm these six current V1 tools are visible:
 
 - `run_task`
 - `task_result`
 - `control_task`
 - `generate_controlled_patch`
+- `refine_controlled_patch`
 - `apply_controlled_patch`
 
 ### 5. Run the first read-only task
@@ -165,7 +166,7 @@ Enable writing only for the intended workspace:
 
 1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
 2. Call `generate_controlled_patch` with the workspace ID and a narrow request. This is a separate controlled-patch flow, not the interactive `run_task` supervision flow.
-3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
+3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. If it needs correction, call `refine_controlled_patch` with the completed patch task ID and a refinement request; it retains the source and returns a new complete proposal against the same `base_head`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
 4. Outside task state, follow `generate_controlled_patch` → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
 5. Inspect the result:
 

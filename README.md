@@ -129,12 +129,13 @@ V1 稳定版仍要求预先登记工作区。创建 `workspaces.json`，填入�
 
 请使用绝对路径。如果客户端已经提供合适的 `PATH`，可以省略 `env` 覆盖。不要把此结构原样套入使用其他 schema 的客户端。
 
-重新连接集成，并确认能看到以下五个当前 V1 工具：
+重新连接集成，并确认能看到以下六个当前 V1 工具：
 
 - `run_task`
 - `task_result`
 - `control_task`
 - `generate_controlled_patch`
+- `refine_controlled_patch`
 - `apply_controlled_patch`
 
 ### 5. 第一次只读任务
@@ -165,7 +166,7 @@ git -C /absolute/path/to/my-project status --short
 
 1. 确认配置根目录就是 Git 顶层、已有 HEAD，且 tracked 工作树和 index 均干净。
 2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求。这是独立的受控补丁流程，不使用交互式 `run_task` 监督流。
-3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
+3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求；它会保留原提案，基于同一个 `base_head` 返回新的完整提案。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
 4. 在任务状态之外，按 `generate_controlled_patch` → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。
 5. 检查结果：
 

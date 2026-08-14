@@ -104,6 +104,21 @@ async function main(): Promise<void> {
     }
   });
 
+  server.registerTool("refine_controlled_patch", {
+    description: "Refine a completed retained patch proposal into a new complete read-only proposal against the same base HEAD.",
+    inputSchema: {
+      patch_task_id: z.string().min(1),
+      change_request: z.string().min(1)
+    }
+  }, async ({ patch_task_id, change_request }) => {
+    try {
+      const proposal = await controlledPatches.refine({ patch_task_id, change_request });
+      return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
   server.registerTool("apply_controlled_patch", {
     description: "Apply one reviewed patch proposal after exact APPLY confirmation. This tool can modify validated tracked text files or add absent 100644 text files, but never stages, commits, or pushes.",
     inputSchema: {
