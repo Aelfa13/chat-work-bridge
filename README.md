@@ -2,11 +2,11 @@
 
 **打通 Chat 与本地 Codex：不再搬提示词，Chat 直接调度、监督并验收 Codex。**
 
-[![Pre-release v1.0.0-rc.3](https://img.shields.io/badge/pre--release-v1.0.0--rc.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.3)
+[![Stable v1.0.0](https://img.shields.io/badge/stable-v1.0.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **[v1.0.0-rc.3](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.3) · V1 Release Candidate / Pre-release · 本地运行 · macOS 由维护者持续实测。** 这是 V1 Release Candidate（`v1.0.0-rc.3`），不是稳定版 `v1.0.0`，也不表示已发布到 npm。早期/社区 Windows 用户已完成只读、补丁生成、`APPLY` 与真实写入流程；`v1.0.0-rc.3` 仍需外部 Windows 与多客户端验证，不等同于维护者认证 Windows 兼容。
+[English](README.en.md) · **[v1.0.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0) · V1 稳定版 · 本地运行 · macOS 由维护者持续实测。** 这是 V1 稳定版（`v1.0.0`），但不表示已发布到 npm。早期/社区 Windows 用户已完成只读、补丁生成、`APPLY` 与真实写入流程；`v1.0.0` 仍需外部 Windows 与多客户端验证，不等同于维护者认证 Windows 兼容。
 
 ## 以前 / 现在
 
@@ -93,11 +93,11 @@ npm install
 npm run build
 ```
 
-V1 RC（`v1.0.0-rc.3`）没有一键安装器。
+V1 稳定版（`v1.0.0`）没有一键安装器。
 
 ### 3. 登记工作区
 
-V1 RC 仍要求预先登记工作区。创建 `workspaces.json`，填入项目的绝对、规范化路径：
+V1 稳定版仍要求预先登记工作区。创建 `workspaces.json`，填入项目的绝对、规范化路径：
 
 ```json
 [

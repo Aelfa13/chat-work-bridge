@@ -2,11 +2,11 @@
 
 **Connect Chat directly to local Codex: no more shuttling prompts and results—Chat dispatches, supervises, and accepts Codex work.**
 
-[![Pre-release v1.0.0-rc.3](https://img.shields.io/badge/pre--release-v1.0.0--rc.3-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.3)
+[![Stable v1.0.0](https://img.shields.io/badge/stable-v1.0.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.0.0-rc.3](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0-rc.3) · V1 Release Candidate / Pre-release · Local · Continuously maintainer-tested on macOS.** This is the V1 Release Candidate (`v1.0.0-rc.3`), not stable `v1.0.0`, and it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.0.0-rc.3` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+[简体中文](README.md) · **[v1.0.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.0.0) · V1 Stable Release · Local · Continuously maintainer-tested on macOS.** This is the stable V1 release (`v1.0.0`), but it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.0.0` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
 
 ## Before / now
 
@@ -93,11 +93,11 @@ npm install
 npm run build
 ```
 
-The V1 RC (`v1.0.0-rc.3`) has no one-click installer.
+The stable V1 release (`v1.0.0`) has no one-click installer.
 
 ### 3. Register a workspace
 
-The V1 RC still requires a pre-registered workspace. Create `workspaces.json` with an absolute, normalized project path:
+The stable V1 release still requires a pre-registered workspace. Create `workspaces.json` with an absolute, normalized project path:
 
 ```json
 [
