@@ -8,6 +8,7 @@ import { CoreError } from "../../../src/core/errors.js";
 import { isId } from "../../../src/core/ids.js";
 import { CodexExecutor } from "../../../src/executors/codex-executor.js";
 import type { ProcessStarter } from "../../../src/executors/codex-executor.js";
+import { VERSION } from "../../../src/version.js";
 
 const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
 if (!isId(TASK_ID_VALUE)) throw new Error("Test task ID must be a UUID v4.");
@@ -117,7 +118,7 @@ test("uses the fixed safe invocation and returns agent text", async () => {
     LANG: "en_US.UTF-8", LC_ALL: "C", USER: "tester", LOGNAME: "tester-log"
   });
   const messages = invocation.stdin.trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(messages[0], { id: 1, method: "initialize", params: { clientInfo: { name: "engineering-bridge", version: "1.0.0" } } });
+  assert.deepEqual(messages[0], { id: 1, method: "initialize", params: { clientInfo: { name: "engineering-bridge", version: VERSION } } });
   assert.deepEqual(messages[1], { method: "initialized", params: {} });
   assert.deepEqual(messages[2], { id: 2, method: "thread/start", params: { cwd: TRUSTED_CWD, approvalPolicy: "never", sandbox: "read-only" } });
   assert.deepEqual(messages[3], { id: 3, method: "turn/start", params: { threadId: "thread-1", input: [{ type: "text", text: instruction }], cwd: TRUSTED_CWD, approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
