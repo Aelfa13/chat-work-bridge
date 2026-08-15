@@ -74,7 +74,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 | 写入前生成完整 Git 补丁 | 不自动测试、stage、commit、push 或创建 Release | 逐个适配其他 CLI agent |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | 谨慎探索多 agent 编排 |
 | 修改已跟踪普通文本文件；新增普通 100644 文本文件 | 没有自动超时；不跨重启持久化 | 以上只是方向，不是已支持功能 |
-| 通过 STDIO 提供五个本地 MCP 工具 | 不是 OS 级读取隔离 | — |
+| 通过 STDIO 提供六个本地 MCP 工具 | 不是 OS 级读取隔离 | — |
 
 ## Quick Start
 

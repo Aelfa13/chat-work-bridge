@@ -74,7 +74,7 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 | Generate a complete Git patch before any write | Does not automatically test, stage, commit, push, or create a Release | Adapt other CLI agents one at a time |
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation | No HTTP, UI, account system, caller authentication, or remote transport | Carefully explore multi-agent orchestration |
 | Modify tracked regular text files; add ordinary 100644 text files | No automatic timeout; no persistence across restarts | These items are directions, not supported features |
-| Five local MCP tools over STDIO | Not OS-level read isolation | — |
+| Six local MCP tools over STDIO | Not OS-level read isolation | — |
 
 ## Quick start
 
