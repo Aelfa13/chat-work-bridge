@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { CoreError, ERROR_CODES, serializeError } from "../../src/core/errors.js";
 
-test("exposes the Codex error codes", () => {
+test("exposes the executor error codes", () => {
   assert.deepEqual(ERROR_CODES, [
     "INTERNAL_ERROR",
     "INVALID_STATE_TRANSITION",
@@ -12,7 +12,10 @@ test("exposes the Codex error codes", () => {
     "WORKSPACE_PRECONDITION_FAILED",
     "CODEX_UNAVAILABLE",
     "CODEX_PROTOCOL_ERROR",
-    "CODEX_EXECUTION_FAILED"
+    "CODEX_EXECUTION_FAILED",
+    "DSH_UNAVAILABLE",
+    "DSH_PROTOCOL_ERROR",
+    "DSH_EXECUTION_FAILED"
   ]);
   assert.deepEqual(serializeError(new CoreError("CODEX_UNAVAILABLE")), {
     code: "CODEX_UNAVAILABLE", message: "Codex is unavailable."
@@ -22,6 +25,15 @@ test("exposes the Codex error codes", () => {
   });
   assert.deepEqual(serializeError(new CoreError("CODEX_EXECUTION_FAILED")), {
     code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed."
+  });
+  assert.deepEqual(serializeError(new CoreError("DSH_UNAVAILABLE")), {
+    code: "DSH_UNAVAILABLE", message: "DSH is unavailable."
+  });
+  assert.deepEqual(serializeError(new CoreError("DSH_PROTOCOL_ERROR")), {
+    code: "DSH_PROTOCOL_ERROR", message: "DSH returned an invalid response."
+  });
+  assert.deepEqual(serializeError(new CoreError("DSH_EXECUTION_FAILED")), {
+    code: "DSH_EXECUTION_FAILED", message: "DSH execution failed."
   });
   assert.deepEqual(serializeError(new CoreError("UNKNOWN_WORKSPACE")), {
     code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered."

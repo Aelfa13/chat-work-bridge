@@ -77,6 +77,38 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
         message: "The requested state transition is not allowed."
       }
     });
+
+    for (const argumentsValue of [
+      { workspace_id: "missing", instruction: "inspect" },
+      { workspace_id: "missing", instruction: "inspect", executor: "codex" },
+      { workspace_id: "missing", instruction: "inspect", executor: "dsh" }
+    ]) {
+      const runResult = await client.callTool({
+        name: "run_task",
+        arguments: argumentsValue
+      });
+      assert.notEqual(runResult.isError, true);
+      const runContent = runResult.content;
+      assert.ok(Array.isArray(runContent));
+      const first = runContent[0] as { type?: string; text?: string } | undefined;
+      assert.equal(first?.type, "text");
+      assert.equal(typeof first?.text, "string");
+      if (typeof first?.text === "string") {
+        const body = JSON.parse(first.text) as { task_id?: unknown };
+        assert.equal(typeof body.task_id, "string");
+      }
+    }
+
+    const unknownExecutor = await client.callTool({
+      name: "run_task",
+      arguments: {
+        workspace_id: "missing",
+        instruction: "inspect",
+        executor: "unknown"
+      }
+    });
+    assert.equal(unknownExecutor.isError, true);
+    assert.equal(JSON.stringify(unknownExecutor).includes("task_id"), false);
   } finally {
     await client.close();
   }

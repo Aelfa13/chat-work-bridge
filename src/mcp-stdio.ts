@@ -7,6 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 
 import { CodexExecutor } from "./executors/codex-executor.js";
+import { DshExecutor } from "./executors/dsh-executor.js";
 import { VERSION } from "./version.js";
 import { serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
@@ -43,7 +44,12 @@ async function main(): Promise<void> {
   const registry = new RegisteredWorkspaceRegistry(entries);
   const service = new RegisteredWorkspaceTaskService(
     registry,
-    (workspaceRoot) => new CodexExecutor(workspaceRoot)
+    (executor, workspaceRoot) => {
+      switch (executor) {
+        case "codex": return new CodexExecutor(workspaceRoot);
+        case "dsh": return new DshExecutor(workspaceRoot);
+      }
+    }
   );
   const controlledPatches = new ControlledPatchService(
     registry,
@@ -55,13 +61,14 @@ async function main(): Promise<void> {
   const server = new McpServer({ name: "engineering-bridge", version: VERSION });
 
   server.registerTool("run_task", {
-    description: "Run a read-only Codex task in a pre-registered workspace. This tool does not modify workspace files.",
+    description: "Run a read-only task with the selected executor in a pre-registered workspace. This tool does not modify workspace files.",
     inputSchema: {
       workspace_id: z.string().min(1),
-      instruction: z.string().min(1)
+      instruction: z.string().min(1),
+      executor: z.enum(["codex", "dsh"]).optional().default("codex")
     }
-  }, ({ workspace_id, instruction }) => {
-    const { taskId } = service.startTask({ workspace_id, instruction });
+  }, ({ workspace_id, instruction, executor }) => {
+    const { taskId } = service.startTask({ workspace_id, instruction, executor });
     return jsonContent({ task_id: taskId });
   });
 

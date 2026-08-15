@@ -6,7 +6,10 @@ export const ERROR_CODES = [
   "WORKSPACE_PRECONDITION_FAILED",
   "CODEX_UNAVAILABLE",
   "CODEX_PROTOCOL_ERROR",
-  "CODEX_EXECUTION_FAILED"
+  "CODEX_EXECUTION_FAILED",
+  "DSH_UNAVAILABLE",
+  "DSH_PROTOCOL_ERROR",
+  "DSH_EXECUTION_FAILED"
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -24,7 +27,10 @@ const ERROR_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   WORKSPACE_PRECONDITION_FAILED: "The workspace preconditions were not met.",
   CODEX_UNAVAILABLE: "Codex is unavailable.",
   CODEX_PROTOCOL_ERROR: "Codex returned an invalid response.",
-  CODEX_EXECUTION_FAILED: "Codex execution failed."
+  CODEX_EXECUTION_FAILED: "Codex execution failed.",
+  DSH_UNAVAILABLE: "DSH is unavailable.",
+  DSH_PROTOCOL_ERROR: "DSH returned an invalid response.",
+  DSH_EXECUTION_FAILED: "DSH execution failed."
 };
 
 function isErrorCode(value: unknown): value is ErrorCode {

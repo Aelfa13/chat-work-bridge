@@ -24,6 +24,12 @@ async function waitForTerminal(service: RegisteredWorkspaceTaskService, taskId: 
   }
 }
 
+async function waitForInteractiveReady(service: RegisteredWorkspaceTaskService, taskId: string): Promise<void> {
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
 test("returns immediately and exposes queued/running without a result", async () => {
   const pending = deferred<ExecutorResult>();
   const calls: ExecutorRequest[] = [];
@@ -204,6 +210,53 @@ test("interactive execution remains read-only when workspace writes are allowed"
 
   assert.equal(calls.length, 1);
   assert.equal(calls[0]?.sandbox, "read-only");
+});
+
+test("normalizes and fixes the executor selection for each interactive task", async () => {
+  const calls: Array<{
+    executor: "codex" | "dsh";
+    workspaceRoot: string;
+    instruction: string;
+  }> = [];
+  const service = new RegisteredWorkspaceTaskService(registry(), (executor, workspaceRoot) => ({
+    execute: async (request) => {
+      calls.push({ executor, workspaceRoot, instruction: request.instruction });
+      return { kind: "completed", output: `${executor}:${request.instruction}` };
+    }
+  }));
+
+  const omitted = service.startTask({ workspace_id: "known", instruction: "default" });
+  await waitForInteractiveReady(service, omitted.taskId);
+  assert.equal(service.taskView(omitted.taskId)?.review_output, "codex:default");
+
+  const explicitCodex = service.startTask({
+    workspace_id: "known",
+    instruction: "explicit",
+    executor: "codex"
+  });
+  await waitForInteractiveReady(service, explicitCodex.taskId);
+  assert.equal(service.taskView(explicitCodex.taskId)?.review_output, "codex:explicit");
+
+  const dsh = service.startTask({
+    workspace_id: "known",
+    instruction: "first",
+    executor: "dsh"
+  });
+  await waitForInteractiveReady(service, dsh.taskId);
+  assert.equal(service.taskView(dsh.taskId)?.review_output, "dsh:first");
+
+  await service.controlTask(dsh.taskId, "continue", "second");
+  await waitForInteractiveReady(service, dsh.taskId);
+  assert.equal(service.taskView(dsh.taskId)?.review_output, "dsh:second");
+
+  await service.controlTask(dsh.taskId, "accept");
+  assert.equal(service.taskView(dsh.taskId)?.output, "dsh:second");
+  assert.deepEqual(calls, [
+    { executor: "codex", workspaceRoot: ROOT, instruction: "default" },
+    { executor: "codex", workspaceRoot: ROOT, instruction: "explicit" },
+    { executor: "dsh", workspaceRoot: ROOT, instruction: "first" },
+    { executor: "dsh", workspaceRoot: ROOT, instruction: "second" }
+  ]);
 });
 
 test("records an unknown workspace asynchronously without creating an executor", async () => {

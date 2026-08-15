@@ -6,10 +6,15 @@ import { CoreError } from "../core/errors.js";
 import type { Executor, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 
+export type ExecutorName = "codex" | "dsh";
+
 export interface RegisteredWorkspaceTaskRequest {
   readonly workspace_id: string;
   readonly instruction: string;
+  readonly executor?: ExecutorName;
 }
+
+type NormalizedRegisteredWorkspaceTaskRequest = RegisteredWorkspaceTaskRequest & { readonly executor: ExecutorName };
 
 export type RegisteredWorkspaceTaskResult =
   | {
@@ -23,7 +28,7 @@ export type RegisteredWorkspaceTaskResult =
     readonly error: SerializedError;
   };
 
-export type ExecutorFactory = (workspaceRoot: string) => Executor;
+export type ExecutorFactory = (executor: ExecutorName, workspaceRoot: string) => Executor;
 export type CompletedOutputTransform = (output: string) => string;
 
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
@@ -40,8 +45,8 @@ export interface ControlledTaskView {
 }
 
 type TaskRecord =
-  | { state: "queued" | "running" }
-  | { state: "completed" | "failed"; result: RegisteredWorkspaceTaskResult };
+  | { state: "queued" | "running"; executor: ExecutorName }
+  | { state: "completed" | "failed"; executor: ExecutorName; result: RegisteredWorkspaceTaskResult };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
 
@@ -63,8 +68,9 @@ export class RegisteredWorkspaceTaskService {
     terminalTaskHandler?: TerminalTaskHandler
   ): { taskId: Id } {
     const taskId = newId();
-    this.tasks.set(taskId, { state: "queued" });
-    queueMicrotask(() => void this.run(taskId, request, completedOutputTransform, terminalTaskHandler));
+    const normalizedRequest = { ...request, executor: request.executor ?? "codex" };
+    this.tasks.set(taskId, { state: "queued", executor: normalizedRequest.executor });
+    queueMicrotask(() => void this.run(taskId, normalizedRequest, completedOutputTransform, terminalTaskHandler));
     return { taskId };
   }
 
@@ -82,7 +88,7 @@ export class RegisteredWorkspaceTaskService {
       throw new CoreError("INTERNAL_ERROR");
     }
     const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
-    this.tasks.set(taskId, { state: "completed", result });
+    this.tasks.set(taskId, { state: "completed", executor: "codex", result });
     this.legacyTerminalTaskIds.push(taskId);
     if (pinned) this.pinnedTaskIds.add(taskId);
     this.trimLegacyTerminalTasks();
@@ -102,7 +108,8 @@ export class RegisteredWorkspaceTaskService {
 
   startTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
     const taskId = newId();
-    this.interactive.set(taskId, { state: "queued", request, evidence: [] });
+    const normalizedRequest = { ...request, executor: request.executor ?? "codex" };
+    this.interactive.set(taskId, { state: "queued", request: normalizedRequest, evidence: [] });
     queueMicrotask(() => void this.executeInteractive(taskId));
     return { taskId };
   }
@@ -152,7 +159,7 @@ export class RegisteredWorkspaceTaskService {
   }
 
   private readonly interactive = new Map<Id, {
-    state: ControlledTaskState; request: RegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
+    state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
     executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined; error?: SerializedError | undefined;
   }>();
   private interactiveTerminalTaskIds: Id[] = [];
@@ -163,7 +170,7 @@ export class RegisteredWorkspaceTaskService {
     record.state = "running";
     try {
       const registration = this.registry.resolveExecution(record.request.workspace_id);
-      const executor = this.executorFactory(registration.root);
+      const executor = this.executorFactory(record.request.executor, registration.root);
       record.executor = executor;
       const result = await executor.execute({ taskId, instruction: record.request.instruction,
         sandbox: "read-only", threadId: record.threadId,
@@ -188,14 +195,14 @@ export class RegisteredWorkspaceTaskService {
 
   private async run(
     taskId: Id,
-    request: RegisteredWorkspaceTaskRequest,
+    request: NormalizedRegisteredWorkspaceTaskRequest,
     completedOutputTransform?: CompletedOutputTransform,
     terminalTaskHandler?: TerminalTaskHandler
   ): Promise<void> {
-    this.tasks.set(taskId, { state: "running" });
+    this.tasks.set(taskId, { state: "running", executor: request.executor });
     try {
       const workspaceRoot = this.registry.resolve(request.workspace_id);
-      const executor = this.executorFactory(workspaceRoot);
+      const executor = this.executorFactory(request.executor, workspaceRoot);
       const result = await executor.execute({ taskId, instruction: request.instruction });
       const taskResult: RegisteredWorkspaceTaskResult = result.kind === "completed"
         ? {
@@ -225,7 +232,8 @@ export class RegisteredWorkspaceTaskService {
     terminalTaskHandler?: TerminalTaskHandler
   ): Promise<void> {
     await terminalTaskHandler?.(result);
-    this.tasks.set(taskId, { state: result.state, result });
+    const executor = this.tasks.get(taskId)?.executor ?? "codex";
+    this.tasks.set(taskId, { state: result.state, executor, result });
     this.legacyTerminalTaskIds.push(taskId);
     this.trimLegacyTerminalTasks();
   }
