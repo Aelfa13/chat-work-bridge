@@ -45,7 +45,7 @@ type TaskRecord =
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
 
-export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void;
+export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void | Promise<void>;
 
 export class RegisteredWorkspaceTaskService {
   private readonly tasks = new Map<Id, TaskRecord>();
@@ -74,6 +74,17 @@ export class RegisteredWorkspaceTaskService {
 
   unpinTask(taskId: Id): void {
     this.pinnedTaskIds.delete(taskId);
+    this.trimLegacyTerminalTasks();
+  }
+
+  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean): void {
+    if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+    const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
+    this.tasks.set(taskId, { state: "completed", result });
+    this.legacyTerminalTaskIds.push(taskId);
+    if (pinned) this.pinnedTaskIds.add(taskId);
     this.trimLegacyTerminalTasks();
   }
 
@@ -197,26 +208,26 @@ export class RegisteredWorkspaceTaskService {
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
           : { id: taskId, state: "failed", error: serializeError(new CoreError("CODEX_EXECUTION_FAILED")) };
-      this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
+      await this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {
         id: taskId,
         state: "failed",
         error: serializeError(error)
       };
-      this.recordLegacyTerminalTask(taskId, result, terminalTaskHandler);
+      await this.recordLegacyTerminalTask(taskId, result);
     }
   }
 
-  private recordLegacyTerminalTask(
+  private async recordLegacyTerminalTask(
     taskId: Id,
     result: RegisteredWorkspaceTaskResult,
     terminalTaskHandler?: TerminalTaskHandler
-  ): void {
+  ): Promise<void> {
+    await terminalTaskHandler?.(result);
     this.tasks.set(taskId, { state: result.state, result });
     this.legacyTerminalTaskIds.push(taskId);
     this.trimLegacyTerminalTasks();
-    terminalTaskHandler?.(result);
   }
 
   private recordInteractiveTerminalTask(taskId: Id): void {

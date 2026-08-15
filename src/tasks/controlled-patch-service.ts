@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
-import { lstat, realpath } from "node:fs/promises";
+import { lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
+import { isId } from "../core/ids.js";
 import type { Id } from "../core/ids.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 import { RegisteredWorkspaceTaskService } from "./registered-workspace-task-service.js";
@@ -19,8 +20,14 @@ type Proposal = {
   workspaceRoot: string;
   baseHead: string;
   state: "proposed" | "applying" | "applied";
+  parentTaskId: Id | undefined;
+  output: string | undefined;
 };
 
+type RetainedProposal = Proposal & { taskId: Id; output: string };
+type RetainedState = { proposals: RetainedProposal[]; appliedTaskIds: Id[] };
+
+const CONTROLLED_PATCH_STATE_VERSION = 1;
 const MAX_APPLIED_PROPOSAL_HISTORY = 100;
 
 const PATCH_INSTRUCTION = (changeRequest: string): string => `You are preparing a proposed change for human review. The workspace is read-only.
@@ -43,12 +50,46 @@ ${changeRequest}`;
 export class ControlledPatchService {
   private readonly proposals = new Map<Id, Proposal>();
   private appliedProposalTaskIds: Id[] = [];
+  private persistenceQueue: Promise<void> = Promise.resolve();
+  private writeSequence = 0;
 
   constructor(
     private readonly registry: RegisteredWorkspaceRegistry,
     private readonly tasks: RegisteredWorkspaceTaskService,
-    private readonly startProcess: GitStarter = spawn
+    private readonly startProcess: GitStarter = spawn,
+    private readonly stateFilePath?: string
   ) {}
+
+  async load(): Promise<void> {
+    if (this.stateFilePath === undefined) return;
+    if (this.proposals.size !== 0) throw new CoreError("INTERNAL_ERROR");
+    let source: string;
+    try {
+      source = await readFile(this.stateFilePath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw new CoreError("INTERNAL_ERROR");
+    }
+
+    let retainedState: RetainedState;
+    try {
+      retainedState = parseRetainedState(JSON.parse(source));
+      for (const proposal of retainedState.proposals) {
+        if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
+          throw new CoreError("INTERNAL_ERROR");
+        }
+      }
+    } catch {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+
+    for (const { taskId, output, ...proposal } of retainedState.proposals) {
+      const restoredState = proposal.state === "applying" ? "proposed" : proposal.state;
+      this.proposals.set(taskId, { ...proposal, state: restoredState, output });
+      this.tasks.restoreControlledPatchTask(taskId, output, restoredState !== "applied");
+    }
+    this.appliedProposalTaskIds = retainedState.appliedTaskIds;
+  }
 
   async generate(request: { workspace_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string }> {
     const workspaceRoot = this.registry.resolveWritable(request.workspace_id);
@@ -66,7 +107,8 @@ export class ControlledPatchService {
     const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
     if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     return this.startProposal(proposal.workspaceId, proposal.workspaceRoot, proposal.baseHead,
-      REFINEMENT_INSTRUCTION(proposal.baseHead, sourceResult.output, request.change_request));
+      REFINEMENT_INSTRUCTION(proposal.baseHead, sourceResult.output, request.change_request),
+      request.patch_task_id as Id);
   }
 
   async apply(request: { patch_task_id: string; confirmation: string }): Promise<{
@@ -86,6 +128,7 @@ export class ControlledPatchService {
 
     proposal.state = "applying";
     try {
+      await this.persist();
       const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
       if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       const targets = parsePatch(result.output);
@@ -105,30 +148,51 @@ export class ControlledPatchService {
       this.appliedProposalTaskIds.push(request.patch_task_id as Id);
       this.trimAppliedProposals();
       this.tasks.unpinTask(request.patch_task_id as Id);
+      await this.persist();
       return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
     } catch (error) {
-      proposal.state = "proposed";
+      if (proposal.state === "applying") {
+        proposal.state = "proposed";
+        await this.persist();
+      }
       throw error;
     }
   }
 
   private startProposal(
-    workspaceId: string, workspaceRoot: string, baseHead: string, instruction: string
+    workspaceId: string,
+    workspaceRoot: string,
+    baseHead: string,
+    instruction: string,
+    parentTaskId?: Id
   ): { taskId: Id; baseHead: string } {
     const { taskId } = this.tasks.runTask({
       workspace_id: workspaceId,
       instruction
-    }, normalizeTrailingLf, (result) => {
+    }, normalizeTrailingLf, async (result) => {
+      const proposal = this.proposals.get(result.id);
       if (result.state === "failed") {
         this.proposals.delete(result.id);
         this.tasks.unpinTask(result.id);
+        return;
+      }
+      if (proposal === undefined) throw new CoreError("INTERNAL_ERROR");
+      proposal.output = result.output;
+      try {
+        await this.persist();
+      } catch (error) {
+        this.proposals.delete(result.id);
+        this.tasks.unpinTask(result.id);
+        throw error;
       }
     });
     this.proposals.set(taskId, {
       workspaceId,
       workspaceRoot,
       baseHead,
-      state: "proposed"
+      state: "proposed",
+      parentTaskId,
+      output: undefined
     });
     this.tasks.pinTask(taskId);
     return { taskId, baseHead };
@@ -144,6 +208,43 @@ export class ControlledPatchService {
     );
     for (const taskId of evictedTaskIds) this.proposals.delete(taskId);
     this.appliedProposalTaskIds = appliedTaskIds.slice(-MAX_APPLIED_PROPOSAL_HISTORY);
+  }
+
+  private persist(): Promise<void> {
+    if (this.stateFilePath === undefined) return Promise.resolve();
+    const proposals: unknown[] = [];
+    for (const [taskId, proposal] of this.proposals) {
+      if (proposal.output === undefined) continue;
+      proposals.push({
+        task_id: taskId,
+        workspace_id: proposal.workspaceId,
+        workspace_root: proposal.workspaceRoot,
+        base_head: proposal.baseHead,
+        state: proposal.state,
+        ...(proposal.parentTaskId === undefined ? {} : { parent_task_id: proposal.parentTaskId }),
+        output: proposal.output
+      });
+    }
+    const contents = `${JSON.stringify({
+      version: CONTROLLED_PATCH_STATE_VERSION,
+      applied_task_ids: this.appliedProposalTaskIds,
+      proposals
+    }, null, 2)}\n`;
+    const write = this.persistenceQueue.then(() => this.replaceStateFile(contents));
+    this.persistenceQueue = write.catch((): void => {});
+    return write;
+  }
+
+  private async replaceStateFile(contents: string): Promise<void> {
+    const stateFilePath = this.stateFilePath!;
+    const temporaryPath = `${stateFilePath}.${process.pid}.${Date.now()}.${this.writeSequence++}.tmp`;
+    try {
+      await writeFile(temporaryPath, contents, { encoding: "utf8", flag: "wx", mode: 0o600 });
+      await rename(temporaryPath, stateFilePath);
+    } catch {
+      await unlink(temporaryPath).catch((): void => {});
+      throw new CoreError("INTERNAL_ERROR");
+    }
   }
 
   private async verifyWorkspace(workspaceRoot: string): Promise<string> {
@@ -187,6 +288,65 @@ export class ControlledPatchService {
       child.stdin.end(input);
     });
   }
+}
+
+function parseRetainedState(value: unknown): RetainedState {
+  if (!isObject(value) || value.version !== CONTROLLED_PATCH_STATE_VERSION ||
+      !Array.isArray(value.applied_task_ids) || !Array.isArray(value.proposals)) {
+    throw new CoreError("INTERNAL_ERROR");
+  }
+
+  const retained = value.proposals.map((item): RetainedProposal => {
+    if (!isObject(item) || !isId(item.task_id) ||
+        typeof item.workspace_id !== "string" || item.workspace_id.length === 0 ||
+        typeof item.workspace_root !== "string" ||
+        typeof item.base_head !== "string" || !/^[0-9a-f]{40,64}$/u.test(item.base_head) ||
+        !["proposed", "applying", "applied"].includes(item.state as string) ||
+        (item.parent_task_id !== undefined && !isId(item.parent_task_id)) ||
+        typeof item.output !== "string") {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+    return {
+      taskId: item.task_id,
+      workspaceId: item.workspace_id,
+      workspaceRoot: item.workspace_root,
+      baseHead: item.base_head,
+      state: item.state as Proposal["state"],
+      parentTaskId: item.parent_task_id as Id | undefined,
+      output: item.output
+    };
+  });
+
+  const byTaskId = new Map<Id, RetainedProposal>();
+  for (const proposal of retained) {
+    if (byTaskId.has(proposal.taskId) || proposal.parentTaskId === proposal.taskId) {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+    byTaskId.set(proposal.taskId, proposal);
+  }
+  for (const proposal of retained) {
+    if (proposal.parentTaskId === undefined) continue;
+    const parent = byTaskId.get(proposal.parentTaskId);
+    if (parent !== undefined && (parent.workspaceId !== proposal.workspaceId ||
+        parent.workspaceRoot !== proposal.workspaceRoot || parent.baseHead !== proposal.baseHead)) {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+  }
+  if (!value.applied_task_ids.every(isId)) throw new CoreError("INTERNAL_ERROR");
+  const appliedTaskIds = value.applied_task_ids as Id[];
+  const appliedTaskIdSet = new Set(appliedTaskIds);
+  const appliedProposals = retained.filter(({ state }) => state === "applied");
+  if (appliedTaskIds.length > MAX_APPLIED_PROPOSAL_HISTORY ||
+      appliedTaskIdSet.size !== appliedTaskIds.length ||
+      appliedProposals.length !== appliedTaskIds.length ||
+      appliedProposals.some(({ taskId }) => !appliedTaskIdSet.has(taskId))) {
+    throw new CoreError("INTERNAL_ERROR");
+  }
+  return { proposals: retained, appliedTaskIds };
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 function normalizeTrailingLf(output: string): string {

@@ -27,18 +27,27 @@ function repository(): string {
   return root;
 }
 
-function fixture(root: string, execute: Executor["execute"], startProcess?: GitStarter): {
+function fixture(
+  root: string,
+  execute: Executor["execute"],
+  startProcess?: GitStarter,
+  stateFilePath?: string
+): {
   controlled: ControlledPatchService;
   tasks: RegisteredWorkspaceTaskService;
 } {
   const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
   const tasks = new RegisteredWorkspaceTaskService(registry, () => ({ execute }));
-  return {
-    controlled: startProcess === undefined
+  const controlled = stateFilePath === undefined
+    ? startProcess === undefined
       ? new ControlledPatchService(registry, tasks)
-      : new ControlledPatchService(registry, tasks, startProcess),
-    tasks
-  };
+      : new ControlledPatchService(registry, tasks, startProcess)
+    : new ControlledPatchService(registry, tasks, startProcess ?? spawn, stateFilePath);
+  return { controlled, tasks };
+}
+
+function retainedStateFile(): string {
+  return join(mkdtempSync(join(tmpdir(), "engineering-bridge-state-")), "controlled-patches.json");
 }
 
 async function terminal(tasks: RegisteredWorkspaceTaskService, taskId: string): Promise<void> {
@@ -106,6 +115,205 @@ const zeroContextPatch = [
   "+after",
   ""
 ].join("\n");
+
+test("restores a completed generated proposal for task_result after restart", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const first = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const generated = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(first.tasks, generated.taskId);
+
+  const restarted = fixture(
+    root,
+    async () => { throw new Error("restored tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+
+  assert.deepEqual(restarted.tasks.taskView(generated.taskId), {
+    taskId: generated.taskId,
+    state: "completed",
+    ready: true,
+    output: validPatch
+  });
+});
+
+test("refines a restored proposal with its parent relationship and original base HEAD retained", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const first = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const source = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(first.tasks, source.taskId);
+
+  const refinedPatch = validPatch.replace("+after", "+refined after");
+  const restarted = fixture(
+    root,
+    async () => ({ kind: "completed", output: refinedPatch }),
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+  const refined = await restarted.controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "improve wording"
+  });
+  await terminal(restarted.tasks, refined.taskId);
+
+  assert.equal(refined.baseHead, source.baseHead);
+  assert.deepEqual(restarted.tasks.result(source.taskId), {
+    id: source.taskId,
+    state: "completed",
+    output: validPatch
+  });
+  const state = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; base_head: string; parent_task_id?: string }>;
+  };
+  const retainedSource = state.proposals.find(({ task_id }) => task_id === source.taskId);
+  const retainedRefinement = state.proposals.find(({ task_id }) => task_id === refined.taskId);
+  assert.equal(retainedSource?.base_head, source.baseHead);
+  assert.equal(retainedRefinement?.base_head, source.baseHead);
+  assert.equal(retainedRefinement?.parent_task_id, source.taskId);
+});
+
+test("applies a refined proposal after restart without rerunning generation", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  let executions = 0;
+  const refinedPatch = validPatch.replace("+after", "+refined after");
+  const first = fixture(
+    root,
+    async () => ({ kind: "completed", output: executions++ === 0 ? validPatch : refinedPatch }),
+    undefined,
+    stateFilePath
+  );
+  const source = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(first.tasks, source.taskId);
+  const refined = await first.controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "improve wording"
+  });
+  await terminal(first.tasks, refined.taskId);
+
+  const restarted = fixture(
+    root,
+    async () => { throw new Error("restored tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+  const applied = await restarted.controlled.apply({
+    patch_task_id: refined.taskId,
+    confirmation: "APPLY"
+  });
+
+  assert.deepEqual(applied.changed_paths, ["note.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "refined after\n");
+});
+
+test("fails safely on malformed retained state", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  writeFileSync(stateFilePath, "{not json}\n");
+  const restarted = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+
+  await expectCode(() => restarted.controlled.load(), "INTERNAL_ERROR");
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "before\n");
+  assert.equal(readFileSync(stateFilePath, "utf8"), "{not json}\n");
+});
+
+test("reports a retention write failure instead of exposing an unretained completed proposal", async () => {
+  const root = repository();
+  const stateFilePath = join(retainedStateFile(), "missing", "controlled-patches.json");
+  const current = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const generated = await current.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(current.tasks, generated.taskId);
+
+  assert.deepEqual(current.tasks.result(generated.taskId), {
+    id: generated.taskId,
+    state: "failed",
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "The request could not be completed."
+    }
+  });
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "before\n");
+});
+
+test("recovers an interrupted applying proposal as retryable after restart", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const first = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const generated = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(first.tasks, generated.taskId);
+
+  const state = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; state: string }>;
+  };
+  const retainedProposal = state.proposals.find(({ task_id }) => task_id === generated.taskId);
+  assert.ok(retainedProposal);
+  retainedProposal.state = "applying";
+  writeFileSync(stateFilePath, `${JSON.stringify(state, null, 2)}\n`);
+
+  const restarted = fixture(
+    root,
+    async () => { throw new Error("restored tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+  const proposals = (restarted.controlled as unknown as {
+    proposals: Map<string, { state: string }>;
+  }).proposals;
+  assert.equal(proposals.get(generated.taskId)?.state, "proposed");
+
+  const applied = await restarted.controlled.apply({
+    patch_task_id: generated.taskId,
+    confirmation: "APPLY"
+  });
+  assert.deepEqual(applied.changed_paths, ["note.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
 
 test("generation records base metadata, binds the task, and keeps Codex instruction read-only", async () => {
   const root = repository();

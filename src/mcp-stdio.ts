@@ -45,7 +45,13 @@ async function main(): Promise<void> {
     registry,
     (workspaceRoot) => new CodexExecutor(workspaceRoot)
   );
-  const controlledPatches = new ControlledPatchService(registry, service);
+  const controlledPatches = new ControlledPatchService(
+    registry,
+    service,
+    undefined,
+    `${configPath}.controlled-patches.json`
+  );
+  await controlledPatches.load();
   const server = new McpServer({ name: "engineering-bridge", version: VERSION });
 
   server.registerTool("run_task", {

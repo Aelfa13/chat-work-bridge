@@ -99,6 +99,40 @@ test("applies a completed-output transform exactly once before storing the resul
   assert.equal(transforms, 1);
 });
 
+test("awaits a terminal handler exactly once before exposing completed output", async () => {
+  const release = deferred<void>();
+  let handlerCalls = 0;
+  const executor: Executor = { execute: async () => ({ kind: "completed", output: "done" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask(
+    { workspace_id: "known", instruction: "inspect" },
+    undefined,
+    async (result) => {
+      handlerCalls += 1;
+      assert.equal(result.state, "completed");
+      await release.promise;
+    }
+  );
+
+  while (handlerCalls === 0) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(handlerCalls, 1);
+  assert.deepEqual(service.status(taskId), { taskId, state: "running" });
+  assert.equal(service.result(taskId), undefined);
+
+  release.resolve(undefined);
+  await waitForTerminal(service, taskId);
+
+  assert.equal(handlerCalls, 1);
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "completed",
+    output: "done"
+  });
+});
+
 test("records executor failures", async () => {
   const error: SerializedError = {
     code: "CODEX_EXECUTION_FAILED",
