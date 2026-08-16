@@ -165,6 +165,29 @@ test("accepts valid output without a trailing newline", async () => {
   assert.deepEqual(result, { kind: "completed", output: "final answer" });
 });
 
+test("maps a zero exit with truly empty stdout to a completed empty output", async () => {
+  const result = await new DshExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ stdout: "" }, []),
+    {}
+  ).execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(result, { kind: "completed", output: "" });
+});
+
+test("maps a nonzero exit with empty stdout to an execution failure", async () => {
+  const result = await new DshExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ stdout: "", exitCode: 3 }, []),
+    {}
+  ).execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(result, {
+    kind: "failed",
+    error: { code: "DSH_EXECUTION_FAILED", message: "DSH execution failed." }
+  });
+});
+
 test("maps invalid UTF-8 completed output to a protocol error", async () => {
   const stdout = Buffer.concat([
     Buffer.from("secret output "),

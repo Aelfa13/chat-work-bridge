@@ -176,7 +176,11 @@ export class DshExecutor implements Executor {
           return;
         }
         if (bytes === 0) {
-          finish(failure("DSH_PROTOCOL_ERROR"));
+          // The headless runner exits 0 whenever the final turn/end completed,
+          // even when the agent produced no non-empty assistant text. An empty
+          // stdout with exit 0 is therefore a legitimate empty completion, not
+          // a protocol error. Nonzero exits still fail above.
+          finish({ kind: "completed", output: "" });
           return;
         }
         if (truncated) {

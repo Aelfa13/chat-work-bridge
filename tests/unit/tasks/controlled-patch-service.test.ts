@@ -144,6 +144,7 @@ test("restores a completed generated proposal for task_result after restart", as
   assert.deepEqual(restarted.tasks.taskView(generated.taskId), {
     taskId: generated.taskId,
     state: "completed",
+    executor: "codex",
     ready: true,
     output: validPatch
   });

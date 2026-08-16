@@ -37,6 +37,12 @@ export type ControlledTaskState = RegisteredWorkspaceTaskState | "waiting_for_su
 export interface ControlledTaskView {
   readonly taskId: Id;
   readonly state: ControlledTaskState;
+  // The executor selection is fixed for the whole task lifetime. It is always
+  // reported honestly: a Codex task may additionally expose its real native
+  // app-server thread id, while a DSH task never gets a fabricated session or
+  // thread id (DSH headless currently has no machine-resumable session seam).
+  readonly executor: ExecutorName;
+  readonly threadId?: string | undefined;
   readonly ready?: boolean;
   readonly output?: string | undefined;
   readonly review_output?: string | undefined;
@@ -125,13 +131,19 @@ export class RegisteredWorkspaceTaskService {
       const legacy = this.tasks.get(taskId);
       if (!legacy) return undefined;
       if (!("result" in legacy)) {
-        return { taskId, state: legacy.state, ready: false };
+        return { taskId, state: legacy.state, executor: legacy.executor, ready: false };
       }
       return legacy.result.state === "completed"
-        ? { taskId, state: "completed", ready: true, output: legacy.result.output }
-        : { taskId, state: "failed", ready: true, error: legacy.result.error };
+        ? { taskId, state: "completed", executor: legacy.executor, ready: true, output: legacy.result.output }
+        : { taskId, state: "failed", executor: legacy.executor, ready: true, error: legacy.result.error };
     }
-    const base = { taskId, state: record.state, evidence: record.evidence };
+    const base: ControlledTaskView = {
+      taskId,
+      state: record.state,
+      executor: record.request.executor,
+      evidence: record.evidence,
+      ...(record.threadId === undefined ? {} : { threadId: record.threadId })
+    };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
     if (record.state === "completed") return { ...base, ready: true, output: record.output };

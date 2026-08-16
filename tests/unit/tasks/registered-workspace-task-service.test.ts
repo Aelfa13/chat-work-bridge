@@ -58,9 +58,9 @@ test("taskView polls a legacy runTask through completed output", async () => {
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
   const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
 
-  assert.deepEqual(service.taskView(taskId), { taskId, state: "queued", ready: false });
+  assert.deepEqual(service.taskView(taskId), { taskId, state: "queued", executor: "codex", ready: false });
   await Promise.resolve();
-  assert.deepEqual(service.taskView(taskId), { taskId, state: "running", ready: false });
+  assert.deepEqual(service.taskView(taskId), { taskId, state: "running", executor: "codex", ready: false });
 
   pending.resolve({ kind: "completed", output: "proposal diff" });
   await waitForTerminal(service, taskId);
@@ -68,6 +68,7 @@ test("taskView polls a legacy runTask through completed output", async () => {
   assert.deepEqual(service.taskView(taskId), {
     taskId,
     state: "completed",
+    executor: "codex",
     ready: true,
     output: "proposal diff"
   });
@@ -211,6 +212,7 @@ test("records an interrupted interactive task as an execution failure without re
   assert.deepEqual(service.taskView(taskId), {
     taskId,
     state: "failed",
+    executor: "codex",
     ready: true,
     evidence: [],
     error: {
@@ -237,6 +239,7 @@ test("records an interrupted DSH interactive task as DSH_EXECUTION_FAILED", asyn
   assert.deepEqual(service.taskView(taskId), {
     taskId,
     state: "failed",
+    executor: "dsh",
     ready: true,
     evidence: [],
     error: {
@@ -293,6 +296,7 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
   assert.deepEqual(service.taskView(taskId), {
     taskId,
     state: "failed",
+    executor: "dsh",
     ready: true,
     evidence: [],
     error: {
@@ -300,6 +304,97 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
       message: "DSH execution failed."
     }
   });
+});
+
+test("taskView exposes the native Codex thread id once one exists and keeps it after accept", async () => {
+  const executor: Executor = {
+    execute: async () => ({ kind: "completed", output: "done", threadId: "thread-1" })
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const view = service.taskView(taskId);
+  assert.equal(view?.executor, "codex");
+  assert.equal(view?.threadId, "thread-1");
+
+  await service.controlTask(taskId, "accept");
+  assert.equal(service.taskView(taskId)?.executor, "codex");
+  assert.equal(service.taskView(taskId)?.threadId, "thread-1");
+});
+
+test("continue preserves the same native Codex thread id and passes it to the resumed turn", async () => {
+  const requests: ExecutorRequest[] = [];
+  const executor: Executor = {
+    execute: async (request) => {
+      requests.push(request);
+      return { kind: "completed", output: `out:${request.instruction}`, threadId: "thread-1" };
+    }
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "first" });
+  await waitForInteractiveReady(service, taskId);
+  assert.equal(service.taskView(taskId)?.threadId, "thread-1");
+
+  await service.controlTask(taskId, "continue", "second");
+  await waitForInteractiveReady(service, taskId);
+
+  assert.deepEqual(requests.map(({ threadId }) => threadId), [undefined, "thread-1"]);
+  assert.equal(service.taskView(taskId)?.threadId, "thread-1");
+});
+
+test("DSH taskView reports executor dsh without fabricating a thread id, across continue", async () => {
+  const executor: Executor = { execute: async () => ({ kind: "completed", output: "done" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), (name) => {
+    assert.equal(name, "dsh");
+    return executor;
+  });
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "first", executor: "dsh" });
+  await waitForInteractiveReady(service, taskId);
+
+  assert.equal(service.taskView(taskId)?.executor, "dsh");
+  assert.equal(service.taskView(taskId)?.threadId, undefined);
+
+  await service.controlTask(taskId, "continue", "second");
+  await waitForInteractiveReady(service, taskId);
+
+  assert.equal(service.taskView(taskId)?.executor, "dsh");
+  assert.equal(service.taskView(taskId)?.threadId, undefined);
+});
+
+test("thread id is omitted while the native thread does not exist yet", async () => {
+  const pending = deferred<ExecutorResult>();
+  const executor: Executor = { execute: () => pending.promise };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  while (service.taskView(taskId)?.state !== "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(service.taskView(taskId)?.executor, "codex");
+  assert.equal(service.taskView(taskId)?.threadId, undefined);
+
+  pending.resolve({ kind: "completed", output: "done", threadId: "thread-1" });
+  await waitForInteractiveReady(service, taskId);
+  assert.equal(service.taskView(taskId)?.threadId, "thread-1");
+});
+
+test("legacy controlled-patch taskView reports the fixed codex executor without a thread id", async () => {
+  // The legacy runTask record stores the executor but never retains a thread
+  // id, so the view must report only fields the record can prove.
+  const executor: Executor = {
+    execute: async () => ({ kind: "completed", output: "diff", threadId: "thread-9" })
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
+  await waitForTerminal(service, taskId);
+
+  const view = service.taskView(taskId);
+  assert.equal(view?.executor, "codex");
+  assert.equal(view?.threadId, undefined);
 });
 
 test("interactive execution remains read-only when workspace writes are allowed", async () => {

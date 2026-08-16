@@ -118,7 +118,9 @@ async function main(): Promise<void> {
   }, ({ task_id }) => {
     const view = service.taskView(task_id);
     if (view === undefined) return unknownTask();
-    return jsonContent({ task_id: view.taskId, state: view.state, ready: view.ready,
+    return jsonContent({ task_id: view.taskId, state: view.state, executor: view.executor,
+      ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
+      ready: view.ready,
       ...(view.output === undefined ? {} : { output: view.output }),
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
       evidence: view.evidence,

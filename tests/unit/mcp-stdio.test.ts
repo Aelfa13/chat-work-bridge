@@ -121,6 +121,81 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
   }
 });
 
+test("task_result honestly reports the fixed executor and never fabricates a thread id", async () => {
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-executor-view-"));
+  const configPath = join(configDir, "workspaces.json");
+  writeFileSync(configPath, "[]\n");
+
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+
+  const call = async (name: string, args: Record<string, unknown>): Promise<{ isError: boolean; body: Record<string, unknown> }> => {
+    const result = await client.callTool({ name, arguments: args });
+    const content = result.content as ToolResult["content"];
+    const text = content[0]?.text ?? "";
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { raw: text };
+    }
+    return { isError: result.isError === true, body: body as Record<string, unknown> };
+  };
+
+  const waitForTerminal = async (taskId: string): Promise<Record<string, unknown>> => {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      const poll = await call("task_result", { task_id: taskId });
+      if (poll.body.state !== "queued" && poll.body.state !== "running") return poll.body;
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    throw new Error("task did not reach a terminal state");
+  };
+
+  try {
+    await client.connect(transport);
+
+    // Default selection is codex; the JSON carries it and no thread_id exists.
+    const codexRun = await call("run_task", {
+      workspace_id: "missing",
+      instruction: "inspect"
+    });
+    const codexTaskId = codexRun.body.task_id;
+    assert.equal(typeof codexTaskId, "string");
+    if (typeof codexTaskId !== "string") return;
+    const codexView = await waitForTerminal(codexTaskId);
+    assert.equal(codexView.executor, "codex");
+    assert.equal("thread_id" in codexView, false);
+    assert.deepEqual(codexView.error, {
+      code: "UNKNOWN_WORKSPACE",
+      message: "The requested workspace is not registered."
+    });
+
+    // Explicit dsh selection is reported as dsh, still without any thread_id.
+    const dshRun = await call("run_task", {
+      workspace_id: "missing",
+      instruction: "inspect",
+      executor: "dsh"
+    });
+    const dshTaskId = dshRun.body.task_id;
+    assert.equal(typeof dshTaskId, "string");
+    if (typeof dshTaskId !== "string") return;
+    const dshView = await waitForTerminal(dshTaskId);
+    assert.equal(dshView.executor, "dsh");
+    assert.equal("thread_id" in dshView, false);
+    assert.deepEqual(dshView.error, {
+      code: "UNKNOWN_WORKSPACE",
+      message: "The requested workspace is not registered."
+    });
+  } finally {
+    await client.close();
+  }
+});
+
 test("bind_project and create_project register workspaces inside approved project roots", async () => {
   const approved = mkdtempSync(join(tmpdir(), "engineering-bridge-approved-"));
   const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-onboard-"));
