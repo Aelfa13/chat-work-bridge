@@ -97,7 +97,11 @@ test("uses the official headless interface with a fixed workspace and returns fi
     LOGNAME: "tester-log",
     DSH_PERMISSION_MODE: "danger-full-access",
     DEEPSEEK_API_KEY: "secret-api-key",
-    HTTP_PROXY: "secret-proxy"
+    DSH_TOOLS_MODE: "full",
+    HTTP_PROXY: "secret-proxy",
+    HTTPS_PROXY: "secret-https-proxy",
+    NO_PROXY: "secret-noproxy",
+    AWS_SECRET_ACCESS_KEY: "secret-aws"
   };
   const executor = new DshExecutor(
     TRUSTED_CWD,
@@ -130,6 +134,8 @@ test("uses the official headless interface with a fixed workspace and returns fi
     LC_ALL: "C",
     USER: "tester",
     LOGNAME: "tester-log",
+    DEEPSEEK_API_KEY: "secret-api-key",
+    DSH_TOOLS_MODE: "full",
     DSH_PERMISSION_MODE: "read-only"
   });
   assert.equal(invocation.stdin.writableEnded, true);
@@ -237,7 +243,7 @@ test("does not impose a sandbox policy before starting DSH", async () => {
   assert.equal(invocations.length, 1);
 });
 
-test("pins DSH read-only permission mode and never forwards the host override or secrets", async () => {
+test("forwards only the sanctioned DSH variables and pins read-only, never host overrides or other secrets", async () => {
   const invocations: Invocation[] = [];
   const hostEnvironment = {
     PATH: "/test/bin",
@@ -245,7 +251,11 @@ test("pins DSH read-only permission mode and never forwards the host override or
     DSH_HOME: "/dsh/test",
     DSH_PERMISSION_MODE: "workspace-write",
     DEEPSEEK_API_KEY: "secret-api-key",
-    HTTP_PROXY: "secret-proxy"
+    DSH_TOOLS_MODE: "full",
+    HTTP_PROXY: "secret-proxy",
+    HTTPS_PROXY: "secret-https-proxy",
+    NO_PROXY: "secret-noproxy",
+    AWS_SECRET_ACCESS_KEY: "secret-aws"
   };
   const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({}, invocations), hostEnvironment);
 
@@ -256,8 +266,12 @@ test("pins DSH read-only permission mode and never forwards the host override or
   const invocation = invocations[0];
   assert.ok(invocation);
   assert.equal(invocation.options.env?.DSH_PERMISSION_MODE, "read-only");
-  assert.equal(invocation.options.env?.DEEPSEEK_API_KEY, undefined);
+  assert.equal(invocation.options.env?.DEEPSEEK_API_KEY, "secret-api-key");
+  assert.equal(invocation.options.env?.DSH_TOOLS_MODE, "full");
   assert.equal(invocation.options.env?.HTTP_PROXY, undefined);
+  assert.equal(invocation.options.env?.HTTPS_PROXY, undefined);
+  assert.equal(invocation.options.env?.NO_PROXY, undefined);
+  assert.equal(invocation.options.env?.AWS_SECRET_ACCESS_KEY, undefined);
   // The invocation itself is unchanged: same official headless interface.
   assert.deepEqual(invocation.args, ["--profile", "headless", "inspect"]);
 });

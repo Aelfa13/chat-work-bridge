@@ -20,7 +20,14 @@ const ENVIRONMENT_ALLOWLIST = [
   "LANG",
   "LC_ALL",
   "USER",
-  "LOGNAME"
+  "LOGNAME",
+  // Sanctioned DSH passthroughs only. DEEPSEEK_API_KEY feeds DSH's native
+  // credential layer and DSH_TOOLS_MODE is a profile-composition input; both
+  // are consumed by the DSH main process and scrubbed from its model-callable
+  // subprocesses. Proxies (which may embed credentials and are visible to
+  // model subprocesses) and any other secret-like variables stay out.
+  "DEEPSEEK_API_KEY",
+  "DSH_TOOLS_MODE"
 ] as const;
 const MAX_OUTPUT_BYTES = 1_048_576;
 const TRUNCATION_MARKER = "[output truncated]";
