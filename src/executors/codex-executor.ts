@@ -2,12 +2,17 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { CoreError, serializeError } from "../core/errors.js";
 import { VERSION } from "../version.js";
+import { resolveCommand } from "./command-resolution.js";
 import type { Executor, ExecutorEvidence, ExecutorRequest, ExecutorResult } from "./executor.js";
 
 export type ProcessStarter = (executable: string, args: readonly string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
+// Official npm target of the Codex CLI, derived from a codex.cmd shim's
+// location so a Windows npm install can be launched through Node directly
+// (never through a shell).
+const CODEX_NODE_TARGET = ["@openai", "codex", "bin", "codex.js"] as const;
 // Machine- and human-readable marker appended to any bounded evidence string
 // that was cut by MAX_TEXT, and the basis of the synthetic change/evidence
 // entries that make list and count truncation visible.
@@ -54,16 +59,33 @@ export class CodexExecutor implements Executor {
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: () => void }>();
 
   constructor(private readonly workspaceRoot: string, private readonly startProcess: ProcessStarter = spawn,
-    private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env) {}
+    private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+    private readonly platform: NodeJS.Platform = process.platform) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     this.turnId = undefined;
     this.startedTurnId = undefined;
     let child: ChildProcessWithoutNullStreams;
     try {
-      child = this.startProcess("codex", ["app-server", "--stdio"], {
+      const options: SpawnOptionsWithoutStdio = {
         cwd: this.workspaceRoot, shell: false, stdio: ["pipe", "pipe", "pipe"], env: environment(this.hostEnvironment)
+      };
+      // Windows: a directly spawnable codex.exe is preferred; an npm-installed
+      // codex.cmd shim is resolved to the official bin/codex.js Node target and
+      // launched through Node directly. Nothing here goes through a shell, and
+      // the user instruction travels over stdin, never through the command
+      // line. Everywhere else (and as the Windows fallback) the original bare
+      // "codex" spawn is unchanged.
+      const resolved = resolveCommand(this.hostEnvironment, "codex", {
+        nodeTarget: CODEX_NODE_TARGET, platform: this.platform
       });
+      if (resolved.kind === "direct") {
+        child = this.startProcess(resolved.executable, ["app-server", "--stdio"], options);
+      } else if (resolved.kind === "node-launcher") {
+        child = this.startProcess(process.execPath, [resolved.scriptPath, "app-server", "--stdio"], options);
+      } else {
+        child = this.startProcess("codex", ["app-server", "--stdio"], options);
+      }
       this.child = child;
     } catch { return failure("CODEX_UNAVAILABLE"); }
 

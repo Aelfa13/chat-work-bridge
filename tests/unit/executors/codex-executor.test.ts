@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
@@ -379,4 +382,181 @@ test("does not cap agent message text or the final output", async () => {
   const result = await pending;
   assert.equal(result.kind, "completed");
   assert.equal(result.output, longText);
+});
+
+// ---------------------------------------------------------------------------
+// Windows command resolution (platform seam = "win32").
+// ---------------------------------------------------------------------------
+
+function windowsDirectory(): string {
+  return mkdtempSync(join(tmpdir(), "bridge-codex-win-"));
+}
+
+test("win32: a real codex.exe on PATH is spawned directly with the fixed args", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "codex.exe"), "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }, "win32");
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.equal(result.kind, "completed");
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, join(dir, "codex.exe"));
+  assert.deepEqual(invocation.args, ["app-server", "--stdio"]);
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.cwd, TRUSTED_CWD);
+});
+
+test("win32: an npm codex.cmd shim resolves to the official bin/codex.js and runs under Node", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "codex.cmd"), "");
+  const binJs = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+  mkdirSync(join(dir, "node_modules", "@openai", "codex", "bin"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }, "win32");
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.equal(result.kind, "completed");
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "app-server", "--stdio"]);
+  assert.equal(invocation.options.shell, false);
+  assert.equal(invocation.options.cwd, TRUSTED_CWD);
+});
+
+test("win32: a local node_modules/.bin codex.cmd shim also resolves to bin/codex.js under Node", async () => {
+  const dir = windowsDirectory();
+  const binDir = join(dir, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "codex.cmd"), "");
+  const binJs = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+  mkdirSync(join(dir, "node_modules", "@openai", "codex", "bin"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: binDir }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "app-server", "--stdio"]);
+  assert.equal(invocation.options.shell, false);
+});
+
+test("win32: a codex.cmd shim without a derivable target fails closed through the bare fallback, never a shell", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "codex.cmd"), "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  // No cmd.exe, no ComSpec, no shell command text: the original bare "codex"
+  // spawn is kept, which maps to CODEX_UNAVAILABLE on a real Windows machine.
+  assert.equal(invocation.executable, "codex");
+  assert.deepEqual(invocation.args, ["app-server", "--stdio"]);
+  assert.equal(invocation.options.shell, false);
+});
+
+test("win32: a shell-like instruction never reaches the argv of the Node launcher", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "codex.cmd"), "");
+  const binJs = join(dir, "node_modules", "@openai", "codex", "bin", "codex.js");
+  mkdirSync(join(dir, "node_modules", "@openai", "codex", "bin"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }, "win32");
+  const instruction = "inspect & echo pwned > marker.txt | 100%! \"中文 测试\"";
+
+  await executor.execute({ taskId: TASK_ID, instruction });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "app-server", "--stdio"]);
+  assert.equal(invocation.args.some((arg) => arg.includes("&") || arg.includes("|") || arg.includes("%")), false);
+  // The instruction travels only over JSON-RPC stdin, as one JSON text field.
+  const messages = invocation.stdin.trim().split("\n").map((line) => JSON.parse(line));
+  const turnStart = messages.find((message) => message.method === "turn/start") as
+    { params?: { input?: Array<{ text?: string }> } } | undefined;
+  assert.equal(turnStart?.params?.input?.[0]?.text, instruction);
+});
+
+test("win32: a real codex.exe is preferred over a codex.cmd shim even when the shim dir comes first", async () => {
+  const shimDir = windowsDirectory();
+  const exeDir = windowsDirectory();
+  writeFileSync(join(shimDir, "codex.cmd"), "");
+  const exe = join(exeDir, "codex.exe");
+  writeFileSync(exe, "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: `${shimDir};${exeDir}` }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.equal(invocations[0]?.executable, exe);
+});
+
+test("win32: no resolvable command keeps the original bare spawn (which maps to CODEX_UNAVAILABLE on Windows)", async () => {
+  const dir = windowsDirectory();
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, "codex");
+  assert.deepEqual(invocation.args, ["app-server", "--stdio"]);
+});
+
+test("POSIX: a Windows-style codex.exe layout on PATH does not change the bare spawn", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "codex.exe"), "");
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "final answer" }, invocations),
+    { PATH: dir }); // default platform is the running (non-Windows) one
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, "codex");
+  assert.deepEqual(invocation.args, ["app-server", "--stdio"]);
+});
+
+test("win32: a spawned command that does not resolve still maps to CODEX_UNAVAILABLE", async () => {
+  const dir = windowsDirectory();
+  const executor = new CodexExecutor(TRUSTED_CWD,
+    fakeStarter({ processError: true }, []),
+    { PATH: dir }, "win32");
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(result, {
+    kind: "failed",
+    error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable." }
+  });
 });

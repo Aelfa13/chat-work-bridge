@@ -4,6 +4,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
 import { CoreError, serializeError } from "../core/errors.js";
+import { resolveCommand } from "./command-resolution.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "./executor.js";
 
 export type DshProcessStarter = (
@@ -31,6 +32,10 @@ const ENVIRONMENT_ALLOWLIST = [
 ] as const;
 const MAX_OUTPUT_BYTES = 1_048_576;
 const TRUNCATION_MARKER = "[output truncated]";
+// npm target of the official DSH package, derived from a dsh.cmd shim's
+// location so a Windows npm install can be launched through Node directly
+// (never through a shell carrying the user-controlled instruction).
+const DSH_NODE_TARGET = ["@deepseek-ai", "dsh", "lib", "bin.js"] as const;
 
 interface ActiveExecution {
   readonly child: ChildProcessWithoutNullStreams;
@@ -115,11 +120,33 @@ export class DshExecutor implements Executor {
   constructor(
     private readonly workspaceRoot: string,
     private readonly startProcess: DshProcessStarter = spawn,
-    private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env
+    private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
+    private readonly platform: NodeJS.Platform = process.platform
   ) {}
 
+  private invocation(): { executable: string; args: string[] } {
+    if (this.platform === "win32") {
+      // Windows: prefer a directly spawnable dsh.exe; otherwise derive the npm
+      // dsh.cmd shim's real Node target and launch it through Node directly, so
+      // the user-controlled instruction travels as a plain argv element and is
+      // never parsed by a shell. A shim without a derivable target fails closed
+      // through the existing launcher/fallback chain (never through ComSpec).
+      const resolved = resolveCommand(this.hostEnvironment, "dsh", {
+        nodeTarget: DSH_NODE_TARGET, platform: this.platform
+      });
+      if (resolved.kind === "direct") return { executable: resolved.executable, args: ["--profile", "headless"] };
+      if (resolved.kind === "node-launcher") return { executable: process.execPath, args: [resolved.scriptPath, "--profile", "headless"] };
+      const launcher = installedRcLauncher(this.hostEnvironment);
+      return launcher
+        ? { executable: process.execPath, args: [launcher, "--profile", "headless"] }
+        : { executable: "dsh", args: ["--profile", "headless"] };
+    }
+    // Non-Windows: the original resolution chain is unchanged.
+    return invocation(this.hostEnvironment);
+  }
+
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
-    const command = invocation(this.hostEnvironment);
+    const command = this.invocation();
     let child: ChildProcessWithoutNullStreams;
     try {
       child = this.startProcess(command.executable, [...command.args, request.instruction], {

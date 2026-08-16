@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
@@ -458,4 +461,129 @@ test("a failed kill never mislabels the execution as interrupted", async () => {
   invocation.write("final answer");
   invocation.close(0);
   assert.deepEqual(await pending, { kind: "completed", output: "final answer" });
+});
+
+// ---------------------------------------------------------------------------
+// Windows command resolution (platform seam = "win32").
+// ---------------------------------------------------------------------------
+
+function windowsDirectory(): string {
+  return mkdtempSync(join(tmpdir(), "bridge-dsh-win-"));
+}
+
+test("win32: a real dsh.exe on PATH is spawned directly with the headless args", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "dsh.exe"), "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { PATH: dir }, "win32");
+  // The instruction is user-controlled shell-like text: it must stay one argv
+  // element and never reach a shell.
+  const instruction = "inspect & echo pwned > marker.txt";
+
+  await executor.execute({ taskId: TASK_ID, instruction, sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, join(dir, "dsh.exe"));
+  assert.deepEqual(invocation.args, ["--profile", "headless", instruction]);
+  assert.equal(invocation.options.shell, false);
+});
+
+test("win32: an npm dsh.cmd shim resolves to its Node target, keeping the instruction a plain argv element", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "dsh.cmd"), "");
+  const binJs = join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  mkdirSync(join(dir, "node_modules", "@deepseek-ai", "dsh", "lib"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { PATH: dir }, "win32");
+  const instruction = "a&b|100%\"(x) 中文 测试";
+
+  await executor.execute({ taskId: TASK_ID, instruction, sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "--profile", "headless", instruction]);
+  assert.equal(invocation.options.shell, false);
+});
+
+test("win32: a local node_modules/.bin dsh.cmd shim also resolves to its Node target", async () => {
+  const dir = windowsDirectory();
+  const binDir = join(dir, "node_modules", ".bin");
+  mkdirSync(binDir, { recursive: true });
+  writeFileSync(join(binDir, "dsh.cmd"), "");
+  const binJs = join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  mkdirSync(join(dir, "node_modules", "@deepseek-ai", "dsh", "lib"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { PATH: binDir }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect", sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "--profile", "headless", "inspect"]);
+});
+
+test("win32: a dsh.cmd shim without a derivable target fails closed through the bare fallback, never ComSpec", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "dsh.cmd"), "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { PATH: dir, COMSPEC: "C:\\Windows\\System32\\cmd.exe" }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect", sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  // The instruction must never go through a shell: the original bare "dsh"
+  // spawn is kept, which maps to DSH_UNAVAILABLE on a real Windows machine.
+  assert.notEqual(invocation.executable, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(invocation.executable, "dsh");
+  assert.deepEqual(invocation.args, ["--profile", "headless", "inspect"]);
+});
+
+test("win32: a PATH key spelled Path still resolves dsh", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "dsh.cmd"), "");
+  const binJs = join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  mkdirSync(join(dir, "node_modules", "@deepseek-ai", "dsh", "lib"), { recursive: true });
+  writeFileSync(binJs, "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { Path: dir }, "win32");
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect", sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, process.execPath);
+  assert.deepEqual(invocation.args, [binJs, "--profile", "headless", "inspect"]);
+});
+
+test("POSIX: a Windows-style dsh layout on PATH does not change the original resolution", async () => {
+  const dir = windowsDirectory();
+  writeFileSync(join(dir, "dsh.exe"), "");
+  writeFileSync(join(dir, "dsh.cmd"), "");
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD,
+    fakeStarter({ stdout: "final answer\n" }, invocations),
+    { PATH: dir }); // default platform is the running (non-Windows) one
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect", sandbox: "read-only" });
+
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.executable, "dsh");
+  assert.deepEqual(invocation.args, ["--profile", "headless", "inspect"]);
 });
