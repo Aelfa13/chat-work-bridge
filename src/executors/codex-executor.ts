@@ -8,6 +8,10 @@ export type ProcessStarter = (executable: string, args: readonly string[], optio
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
+// Machine- and human-readable marker appended to any bounded evidence string
+// that was cut by MAX_TEXT, and the basis of the synthetic change/evidence
+// entries that make list and count truncation visible.
+const TRUNCATION_MARKER = "[truncated]";
 
 function failure(code: "CODEX_UNAVAILABLE" | "CODEX_PROTOCOL_ERROR" | "CODEX_EXECUTION_FAILED"): ExecutorResult {
   return { kind: "failed", error: serializeError(new CoreError(code)) };
@@ -31,7 +35,15 @@ function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   return result;
 }
 function object(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null; }
-function bounded(value: unknown): string { return typeof value === "string" ? value.slice(0, MAX_TEXT) : ""; }
+function bounded(value: unknown): string {
+  if (typeof value !== "string") return "";
+  if (value.length <= MAX_TEXT) return value;
+  // The marker must fit inside the MAX_TEXT budget: its length plus the
+  // newline separator is deducted from the retained content, so the final
+  // string never exceeds MAX_TEXT.
+  const retained = MAX_TEXT - TRUNCATION_MARKER.length - 1;
+  return `${value.slice(0, retained)}\n${TRUNCATION_MARKER}`;
+}
 
 export class CodexExecutor implements Executor {
   private child: ChildProcessWithoutNullStreams | undefined;
@@ -56,6 +68,7 @@ export class CodexExecutor implements Executor {
     } catch { return failure("CODEX_UNAVAILABLE"); }
 
     const evidence = new Map<string, ExecutorEvidence>();
+    let evidenceDropped = 0;
     let output = "";
     let buffer = "";
     let terminal: ((result: ExecutorResult) => void) | undefined;
@@ -76,6 +89,22 @@ export class CodexExecutor implements Executor {
       if (!child.killed) child.kill();
     };
     const unavailable = (): void => finish(failure("CODEX_UNAVAILABLE"));
+    // The evidence view a supervisor receives. Real evidence and the synthetic
+    // evidence-drop marker together never exceed MAX_EVIDENCE: the marker only
+    // appears once real entries were evicted, and the eviction loop above
+    // reserves its slot within the same budget. Rebuilt from a single counter,
+    // it can never grow evidence unboundedly.
+    const visibleEvidence = (): readonly ExecutorEvidence[] => {
+      const items = [...evidence.values()];
+      return evidenceDropped === 0
+        ? items
+        : [...items, {
+          id: "evidence-drop",
+          type: "commandExecution",
+          status: "completed",
+          command: `${evidenceDropped} evidence item(s) dropped: evidence limit exceeded`
+        }];
+    };
     child.on("error", unavailable);
     child.stdin.on("error", unavailable);
     child.stdout.on("error", unavailable);
@@ -113,18 +142,35 @@ export class CodexExecutor implements Executor {
             let entry: ExecutorEvidence;
             if (item.type === "commandExecution") entry = { id, type: item.type, status, command: bounded(item.command) };
             else {
-              const changes = Array.isArray(item.changes) ? item.changes.slice(0, 50).filter(object).map((c) => ({ path: bounded(c.path), diff: bounded(c.diff) })) : [];
+              const rawChanges = Array.isArray(item.changes) ? item.changes : [];
+              // The 50-entry bound includes the synthetic truncation marker: a
+              // truncated list keeps 49 real entries and spends the 50th slot
+              // on the marker, so the final list never exceeds the bound.
+              const kept = rawChanges.length > 50 ? 49 : 50;
+              const changes = rawChanges.slice(0, kept).filter(object).map((c) => ({ path: bounded(c.path), diff: bounded(c.diff) }));
+              if (rawChanges.length > 50) {
+                // omitted counts exactly the real changes that were never
+                // returned to the supervisor.
+                changes.push({ path: `[truncated: ${rawChanges.length - kept} additional changes omitted]`, diff: "" });
+              }
               entry = { id, type: item.type, status, changes };
             }
             evidence.set(id, entry);
-            while (evidence.size > MAX_EVIDENCE) evidence.delete(evidence.keys().next().value as string);
-            request.onEvidence?.([...evidence.values()]);
+            // The MAX_EVIDENCE budget includes the evidence-drop marker: once
+            // any drop has happened the marker reserves one slot within the
+            // same budget, so the final visible list never exceeds
+            // MAX_EVIDENCE entries.
+            while (evidence.size + (evidenceDropped > 0 ? 1 : 0) > MAX_EVIDENCE) {
+              evidence.delete(evidence.keys().next().value as string);
+              evidenceDropped += 1;
+            }
+            request.onEvidence?.(visibleEvidence());
           }
         }
         if (message.method === "turn/completed") {
           const turn = object(message.params.turn) ? message.params.turn : message.params;
           const status = turn.status;
-          const common = { threadId: this.threadId, evidence: [...evidence.values()] };
+          const common = { threadId: this.threadId, evidence: visibleEvidence() };
           if (status === "failed") finish({ ...failedTurn(turn), ...common });
           else if (status === "interrupted") finish({ kind: "interrupted", output, ...common });
           else if (status === "completed") finish({ kind: "completed", output, ...common });

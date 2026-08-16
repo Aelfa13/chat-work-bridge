@@ -26,6 +26,10 @@ export type RegisteredWorkspaceTaskResult =
     readonly id: Id;
     readonly state: "failed";
     readonly error: SerializedError;
+    // Present only when the executor returned genuine partial output for an
+    // interrupted run; never for ordinary failures and never as completed
+    // output. Empty partial output is omitted entirely.
+    readonly partial_output?: string | undefined;
   };
 
 export type ExecutorFactory = (executor: ExecutorName, workspaceRoot: string) => Executor;
@@ -46,6 +50,7 @@ export interface ControlledTaskView {
   readonly ready?: boolean;
   readonly output?: string | undefined;
   readonly review_output?: string | undefined;
+  readonly partial_output?: string | undefined;
   readonly evidence?: readonly ExecutorEvidence[];
   readonly error?: SerializedError | undefined;
 }
@@ -60,6 +65,17 @@ export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => voi
 
 function interruptedError(executor: ExecutorName): SerializedError {
   return serializeError(new CoreError(executor === "dsh" ? "DSH_EXECUTION_FAILED" : "CODEX_EXECUTION_FAILED"));
+}
+
+// Interrupt keeps the failed terminal state and its existing safe error, and
+// additionally retains the executor's genuine partial output. Empty partial
+// output (interrupt before anything was produced) is not fabricated: the field
+// is simply omitted.
+function interruptedTaskResult(taskId: Id, executor: ExecutorName, partialOutput: string): RegisteredWorkspaceTaskResult {
+  if (partialOutput === "") {
+    return { id: taskId, state: "failed", error: interruptedError(executor) };
+  }
+  return { id: taskId, state: "failed", error: interruptedError(executor), partial_output: partialOutput };
 }
 
 export class RegisteredWorkspaceTaskService {
@@ -135,7 +151,14 @@ export class RegisteredWorkspaceTaskService {
       }
       return legacy.result.state === "completed"
         ? { taskId, state: "completed", executor: legacy.executor, ready: true, output: legacy.result.output }
-        : { taskId, state: "failed", executor: legacy.executor, ready: true, error: legacy.result.error };
+        : {
+          taskId,
+          state: "failed",
+          executor: legacy.executor,
+          ready: true,
+          error: legacy.result.error,
+          ...(legacy.result.partial_output === undefined ? {} : { partial_output: legacy.result.partial_output })
+        };
     }
     const base: ControlledTaskView = {
       taskId,
@@ -147,7 +170,14 @@ export class RegisteredWorkspaceTaskService {
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
     if (record.state === "completed") return { ...base, ready: true, output: record.output };
-    return { ...base, ready: true, error: record.error };
+    return {
+      ...base,
+      ready: true,
+      error: record.error,
+      ...(record.partialOutput === undefined || record.partialOutput === ""
+        ? {}
+        : { partial_output: record.partialOutput })
+    };
   }
 
   async controlTask(taskId: unknown, action: "continue" | "steer" | "interrupt" | "accept", instruction?: string): Promise<ControlledTaskView> {
@@ -176,7 +206,8 @@ export class RegisteredWorkspaceTaskService {
 
   private readonly interactive = new Map<Id, {
     state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
-    executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined; error?: SerializedError | undefined;
+    executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
+    partialOutput?: string | undefined; error?: SerializedError | undefined;
   }>();
   private interactiveTerminalTaskIds: Id[] = [];
 
@@ -196,6 +227,10 @@ export class RegisteredWorkspaceTaskService {
       record.evidence = result.evidence ?? record.evidence;
       if (result.kind === "failed") { record.state = "failed"; record.error = result.error; }
       else if (result.kind === "interrupted") {
+        // The failed terminal state and its safe error are unchanged; the
+        // executor's genuine partial output is retained separately and never
+        // treated as completed review output.
+        record.partialOutput = result.output;
         record.output = undefined;
         record.state = "failed";
         record.error = interruptedError(record.request.executor);
@@ -230,7 +265,7 @@ export class RegisteredWorkspaceTaskService {
         }
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
-          : { id: taskId, state: "failed", error: interruptedError(request.executor) };
+          : interruptedTaskResult(taskId, request.executor, result.output);
       await this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {

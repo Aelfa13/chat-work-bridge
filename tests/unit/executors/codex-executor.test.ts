@@ -8,6 +8,7 @@ import { CoreError } from "../../../src/core/errors.js";
 import { isId } from "../../../src/core/ids.js";
 import { CodexExecutor } from "../../../src/executors/codex-executor.js";
 import type { ProcessStarter } from "../../../src/executors/codex-executor.js";
+import type { ExecutorEvidence } from "../../../src/executors/executor.js";
 import { VERSION } from "../../../src/version.js";
 
 const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
@@ -229,4 +230,153 @@ test("reports an allowlisted failed-turn reason without exposing raw error detai
   assert.equal(serialized.includes("secret upstream message"), false);
   assert.equal(serialized.includes("/private/path"), false);
   assert.equal(serialized.includes("secret diagnostics"), false);
+});
+
+test("an interrupted turn keeps the last completed agent text as real partial output", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: "partial answer" } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } } });
+
+  assert.deepEqual(await pending, {
+    kind: "interrupted",
+    output: "partial answer",
+    threadId: "thread-1",
+    evidence: []
+  });
+});
+
+test("marks oversized evidence strings with a visible truncation marker inside the bound", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.send({ method: "item/completed", params: { item: { id: "cmd-1", type: "commandExecution", status: "completed", command: "c".repeat(20_000) } } });
+  invocation.send({ method: "item/completed", params: { item: { id: "change-1", type: "fileChange", status: "completed", changes: [{ path: "p".repeat(20_000), diff: "d".repeat(20_000) }] } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.equal(result.kind, "completed");
+  const evidence = result.evidence ?? [];
+  assert.equal(evidence.length, 2);
+  // The marker takes its own slot inside the 16_384 budget: 16_372 content
+  // bytes plus "\n[truncated]" (marker length 11 plus the separator).
+  const command = evidence.find(({ id }) => id === "cmd-1");
+  assert.equal(command?.command, `${"c".repeat(16_372)}\n[truncated]`);
+  assert.ok((command?.command?.length ?? 0) <= 16_384);
+  const change = evidence.find(({ id }) => id === "change-1");
+  assert.equal(change?.changes?.[0]?.path, `${"p".repeat(16_372)}\n[truncated]`);
+  assert.equal(change?.changes?.[0]?.diff, `${"d".repeat(16_372)}\n[truncated]`);
+  assert.ok((change?.changes?.[0]?.path.length ?? 0) <= 16_384);
+  assert.ok((change?.changes?.[0]?.diff.length ?? 0) <= 16_384);
+});
+
+test("marks an oversized changes list with an in-bound truncation entry and an accurate omitted count", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  const changes = Array.from({ length: 55 }, (_, index) => ({ path: `file-${index}.txt`, diff: `diff ${index}` }));
+  invocation.send({ method: "item/completed", params: { item: { id: "change-1", type: "fileChange", status: "completed", changes } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.equal(result.kind, "completed");
+  const change = result.evidence?.find(({ id }) => id === "change-1");
+  // 49 real entries plus the marker fit the 50-entry bound; 55 - 49 = 6
+  // real changes are omitted and the count says so.
+  assert.equal(change?.changes?.length, 50);
+  assert.deepEqual(change?.changes?.[0], { path: "file-0.txt", diff: "diff 0" });
+  assert.deepEqual(change?.changes?.[48], { path: "file-48.txt", diff: "diff 48" });
+  assert.deepEqual(change?.changes?.[49], { path: "[truncated: 6 additional changes omitted]", diff: "" });
+});
+
+test("reports evidence evicted by the count limit through an in-budget synthetic drop item", async () => {
+  const invocations: Invocation[] = [];
+  const emissions: Array<readonly ExecutorEvidence[]> = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({
+    taskId: TASK_ID,
+    instruction: "x",
+    onEvidence: (items) => { emissions.push(items); }
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  for (let index = 1; index <= 55; index += 1) {
+    invocation.send({ method: "item/completed", params: { item: { id: `cmd-${index}`, type: "commandExecution", status: "completed", command: `command ${index}` } } });
+  }
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.equal(result.kind, "completed");
+  const evidence = result.evidence ?? [];
+  // The marker reserves one of the 50 slots: 49 real entries plus the marker.
+  assert.equal(evidence.length, 50);
+  assert.equal(evidence[0]?.id, "cmd-7");
+  assert.equal(evidence[48]?.id, "cmd-55");
+  const drop = evidence[49];
+  assert.equal(drop?.id, "evidence-drop");
+  assert.equal(drop?.type, "commandExecution");
+  assert.match(drop?.command ?? "", /6 evidence item\(s\) dropped: evidence limit exceeded/u);
+
+  // 55 real entries arrived; 49 are shown, so exactly 6 were dropped, and
+  // every onEvidence emission respects the 50-item budget.
+  assert.equal(emissions.length, 55);
+  assert.equal(emissions[49]?.length, 50);
+  assert.equal(emissions[49]?.[50], undefined);
+  assert.equal(emissions[50]?.length, 50);
+  assert.equal(emissions[50]?.[49]?.id, "evidence-drop");
+  assert.equal(emissions[54]?.length, 50);
+  assert.equal(emissions[54]?.[0]?.id, "cmd-7");
+  assert.equal(emissions[54]?.[49]?.id, "evidence-drop");
+});
+
+test("passes untruncated evidence through unchanged", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.send({ method: "item/completed", params: { item: { id: "cmd-1", type: "commandExecution", status: "completed", command: "ls -la" } } });
+  invocation.send({ method: "item/completed", params: { item: { id: "change-1", type: "fileChange", status: "completed", changes: [{ path: "src/a.ts", diff: "+1 line" }] } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.equal(result.kind, "completed");
+  assert.deepEqual(result.evidence, [
+    { id: "cmd-1", type: "commandExecution", status: "completed", command: "ls -la" },
+    { id: "change-1", type: "fileChange", status: "completed", changes: [{ path: "src/a.ts", diff: "+1 line" }] }
+  ]);
+});
+
+test("does not cap agent message text or the final output", async () => {
+  const longText = "t".repeat(30_000);
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: longText } } });
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  assert.equal(result.kind, "completed");
+  assert.equal(result.output, longText);
 });

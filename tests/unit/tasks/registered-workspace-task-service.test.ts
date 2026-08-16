@@ -22,6 +22,49 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   return { promise, resolve };
 }
 
+// Runs the real DshExecutor against a scripted child process, so interrupt
+// tests observe the actual partial-stdout caching path.
+function dshHarness(): {
+  service: RegisteredWorkspaceTaskService;
+  write: (chunk: string) => void;
+  close: (code: number | null) => void;
+} {
+  let emitWrite: ((chunk: string) => void) | undefined;
+  let emitClose: ((code: number | null) => void) | undefined;
+  const service = new RegisteredWorkspaceTaskService(registry(), (executor, workspaceRoot) => {
+    assert.equal(executor, "dsh");
+    assert.equal(workspaceRoot, ROOT);
+    return new DshExecutor(ROOT, () => {
+      const child = new EventEmitter();
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      Object.assign(child, {
+        stdin,
+        stdout,
+        stderr,
+        killed: false,
+        kill(signal?: string) {
+          this.killed = true;
+          return true;
+        }
+      });
+      emitWrite = (chunk) => { stdout.write(chunk); };
+      emitClose = (code) => {
+        stdout.end();
+        stderr.end();
+        child.emit("close", code, null);
+      };
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+  });
+  return {
+    service,
+    write: (chunk) => emitWrite?.(chunk),
+    close: (code) => emitClose?.(code)
+  };
+}
+
 async function waitForTerminal(service: RegisteredWorkspaceTaskService, taskId: string): Promise<void> {
   while (service.status(taskId)?.state === "queued" || service.status(taskId)?.state === "running") {
     await new Promise<void>((resolve) => setImmediate(resolve));
@@ -173,7 +216,8 @@ test("records an interrupted legacy task as an execution failure", async () => {
     error: {
       code: "CODEX_EXECUTION_FAILED",
       message: "Codex execution failed."
-    }
+    },
+    partial_output: "partial"
   });
 });
 
@@ -196,6 +240,24 @@ test("records an interrupted DSH legacy task as DSH_EXECUTION_FAILED", async () 
     error: {
       code: "DSH_EXECUTION_FAILED",
       message: "DSH execution failed."
+    },
+    partial_output: "partial"
+  });
+});
+
+test("an interrupted legacy task without any partial output omits the field", async () => {
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
+
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "CODEX_EXECUTION_FAILED",
+      message: "Codex execution failed."
     }
   });
 });
@@ -215,6 +277,7 @@ test("records an interrupted interactive task as an execution failure without re
     executor: "codex",
     ready: true,
     evidence: [],
+    partial_output: "partial",
     error: {
       code: "CODEX_EXECUTION_FAILED",
       message: "Codex execution failed."
@@ -242,10 +305,27 @@ test("records an interrupted DSH interactive task as DSH_EXECUTION_FAILED", asyn
     executor: "dsh",
     ready: true,
     evidence: [],
+    partial_output: "partial",
     error: {
       code: "DSH_EXECUTION_FAILED",
       message: "DSH execution failed."
     }
+  });
+});
+
+test("an interrupted interactive task without any partial output omits the field", async () => {
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+  await waitForInteractiveReady(service, taskId);
+
+  const view = service.taskView(taskId);
+  assert.ok(view);
+  assert.equal(view.state, "failed");
+  assert.equal("partial_output" in view, false);
+  assert.deepEqual(view.error, {
+    code: "CODEX_EXECUTION_FAILED",
+    message: "Codex execution failed."
   });
 });
 
@@ -304,6 +384,95 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
       message: "DSH execution failed."
     }
   });
+});
+
+test("DSH interrupt keeps the cached partial stdout as partial_output on the failed view", async () => {
+  const harness = dshHarness();
+  const { taskId } = harness.service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (harness.service.taskView(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  harness.write("partial answer");
+  await harness.service.controlTask(taskId, "interrupt");
+  harness.close(7);
+
+  while (harness.service.taskView(taskId)?.state === "queued" || harness.service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(harness.service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    executor: "dsh",
+    ready: true,
+    evidence: [],
+    partial_output: "partial answer",
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
+    }
+  });
+});
+
+test("DSH interrupt before any stdout omits partial_output", async () => {
+  const harness = dshHarness();
+  const { taskId } = harness.service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (harness.service.taskView(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await harness.service.controlTask(taskId, "interrupt");
+  harness.close(0);
+
+  while (harness.service.taskView(taskId)?.state === "queued" || harness.service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const view = harness.service.taskView(taskId);
+  assert.ok(view);
+  assert.equal("partial_output" in view, false);
+  assert.deepEqual(view, {
+    taskId,
+    state: "failed",
+    executor: "dsh",
+    ready: true,
+    evidence: [],
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
+    }
+  });
+});
+
+test("a DSH failure without interrupt exposes neither partial output nor stdout", async () => {
+  const harness = dshHarness();
+  const { taskId } = harness.service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (harness.service.taskView(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  harness.write("secret partial");
+  harness.close(7);
+
+  while (harness.service.taskView(taskId)?.state === "queued" || harness.service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  const view = harness.service.taskView(taskId);
+  assert.ok(view);
+  assert.deepEqual(view, {
+    taskId,
+    state: "failed",
+    executor: "dsh",
+    ready: true,
+    evidence: [],
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
+    }
+  });
+  assert.equal(JSON.stringify(view).includes("secret partial"), false);
 });
 
 test("taskView exposes the native Codex thread id once one exists and keeps it after accept", async () => {
