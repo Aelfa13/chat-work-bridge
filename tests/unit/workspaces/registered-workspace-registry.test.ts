@@ -56,3 +56,89 @@ test("rejects relative, non-normalized, or empty configuration fields", () => {
     "WORKSPACE_BOUNDARY_VIOLATION"
   );
 });
+
+test("registers managed workspaces read-only and resolves them", () => {
+  const registry = new RegisteredWorkspaceRegistry([]);
+  registry.registerManaged("managed-1", ROOT);
+
+  assert.equal(registry.resolve("managed-1"), ROOT);
+  assert.deepEqual(registry.resolveExecution("managed-1"), { root: ROOT, allowWrite: false });
+  expectCode(() => registry.resolveWritable("managed-1"), "WORKSPACE_PRECONDITION_FAILED");
+  expectCode(() => registry.resolve("unknown-managed"), "UNKNOWN_WORKSPACE");
+});
+
+test("registerManaged is idempotent for the same id and root", () => {
+  const registry = new RegisteredWorkspaceRegistry([]);
+  registry.registerManaged("managed-1", ROOT);
+  registry.registerManaged("managed-1", ROOT);
+  assert.equal(registry.resolve("managed-1"), ROOT);
+});
+
+test("registerManaged rejects conflicting ids and occupied canonical roots", () => {
+  const registry = new RegisteredWorkspaceRegistry([{ id: "manual", root: ROOT }]);
+  expectCode(() => registry.registerManaged("managed-1", ROOT), "WORKSPACE_BOUNDARY_VIOLATION");
+
+  registry.registerManaged("managed-1", "/managed/root");
+  expectCode(() => registry.registerManaged("managed-1", "/other/root"), "WORKSPACE_BOUNDARY_VIOLATION");
+  expectCode(() => registry.registerManaged("managed-2", "/managed/root"), "WORKSPACE_BOUNDARY_VIOLATION");
+});
+
+test("findByRoot returns the manual registration with its real write access", () => {
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "manual", root: ROOT, allow_write: true }
+  ]);
+
+  assert.deepEqual(registry.findByRoot(ROOT), {
+    id: "manual",
+    root: ROOT,
+    allowWrite: true,
+    source: "manual"
+  });
+  assert.equal(registry.findByRoot("/unknown/root"), undefined);
+});
+
+test("findByRoot resolves managed registrations and manual canonical duplicates first-win", () => {
+  const canonicalize = (root: string): string => root === "/manual/root" ? "/canonical/root" : root;
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "first", root: "/manual/root" },
+    { id: "second", root: "/two/root" }
+  ], canonicalize);
+
+  assert.deepEqual(registry.findByRoot("/canonical/root"), {
+    id: "first",
+    root: "/manual/root",
+    allowWrite: false,
+    source: "manual"
+  });
+
+  registry.registerManaged("managed-1", "/managed/root");
+  assert.deepEqual(registry.findByRoot("/managed/root"), {
+    id: "managed-1",
+    root: "/managed/root",
+    allowWrite: false,
+    source: "managed"
+  });
+});
+
+test("a managed registration cannot occupy a manual canonical root", () => {
+  const canonicalize = (): string => "/canonical/root";
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "manual", root: "/manual/root", allow_write: true }
+  ], canonicalize);
+
+  expectCode(() => registry.registerManaged("managed-1", "/managed/root"), "WORKSPACE_BOUNDARY_VIOLATION");
+});
+
+test("manual roots that cannot be canonicalized fall back to the literal root without failing startup", () => {
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "known", root: "/definitely/missing/path" }
+  ]);
+
+  assert.deepEqual(registry.findByRoot("/definitely/missing/path"), {
+    id: "known",
+    root: "/definitely/missing/path",
+    allowWrite: false,
+    source: "manual"
+  });
+  assert.equal(registry.resolve("known"), "/definitely/missing/path");
+});

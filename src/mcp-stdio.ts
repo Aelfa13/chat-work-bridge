@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { readFile } from "node:fs/promises";
+import { isAbsolute, normalize } from "node:path";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -9,16 +10,32 @@ import { z } from "zod";
 import { CodexExecutor } from "./executors/codex-executor.js";
 import { DshExecutor } from "./executors/dsh-executor.js";
 import { VERSION } from "./version.js";
-import { serializeError } from "./core/errors.js";
+import { CoreError, serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
 import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
+import { ManagedWorkspaceCatalog } from "./workspaces/managed-workspace-catalog.js";
 import { RegisteredWorkspaceRegistry } from "./workspaces/registered-workspace-registry.js";
+import { WorkspaceOnboardingService } from "./workspaces/workspace-onboarding-service.js";
 
-const WorkspaceConfigSchema = z.array(z.object({
+const WorkspaceEntrySchema = z.object({
   id: z.string().min(1),
   root: z.string().min(1),
   allow_write: z.boolean().optional()
-}).strict());
+}).strict();
+
+const ProjectRootEntrySchema = z.object({
+  kind: z.literal("project_root"),
+  root: z.string().min(1)
+}).strict();
+
+const WorkspaceConfigSchema = z.array(z.union([WorkspaceEntrySchema, ProjectRootEntrySchema]));
+
+type WorkspaceEntry = z.infer<typeof WorkspaceEntrySchema>;
+type ProjectRootEntry = z.infer<typeof ProjectRootEntrySchema>;
+
+function isProjectRootEntry(entry: WorkspaceEntry | ProjectRootEntry): entry is ProjectRootEntry {
+  return "kind" in entry;
+}
 
 function jsonContent(value: unknown) {
   return {
@@ -40,8 +57,31 @@ async function main(): Promise<void> {
 
   const configPath = process.argv[2];
   if (configPath === undefined) throw new Error("Workspace configuration path is required.");
-  const entries = WorkspaceConfigSchema.parse(JSON.parse(await readFile(configPath, "utf8")));
-  const registry = new RegisteredWorkspaceRegistry(entries);
+  const parsed = WorkspaceConfigSchema.parse(JSON.parse(await readFile(configPath, "utf8")));
+  const workspaceEntries = parsed.filter((entry): entry is WorkspaceEntry => !isProjectRootEntry(entry));
+  const projectRootEntries = parsed.filter(isProjectRootEntry);
+  for (const entry of projectRootEntries) {
+    // project_root entries share the manual workspace root semantics: absolute
+    // and already normalized, rejected at startup otherwise.
+    if (!isAbsolute(entry.root) || normalize(entry.root) !== entry.root) {
+      throw new CoreError("WORKSPACE_BOUNDARY_VIOLATION");
+    }
+  }
+  const registry = new RegisteredWorkspaceRegistry(workspaceEntries);
+  const catalog = new ManagedWorkspaceCatalog(`${configPath}.managed-workspaces.json`);
+  await catalog.load();
+  for (const entry of catalog.entries()) {
+    try {
+      registry.registerManaged(entry.id, entry.root);
+    } catch {
+      // A manual or earlier managed registration already owns the id or root.
+    }
+  }
+  const onboarding = new WorkspaceOnboardingService(
+    registry,
+    catalog,
+    projectRootEntries.map(({ root }) => root)
+  );
   const service = new RegisteredWorkspaceTaskService(
     registry,
     (executor, workspaceRoot) => {
@@ -97,6 +137,35 @@ async function main(): Promise<void> {
     try {
       const view = await service.controlTask(task_id, action, instruction);
       return jsonContent({ task_id: view.taskId, state: view.state });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("bind_project", {
+    description: "Register an existing local project directory as a read-only workspace. The path must already exist inside a configured project_root and the call requires exact BIND confirmation.",
+    inputSchema: {
+      project_path: z.string().min(1),
+      confirmation: z.literal("BIND")
+    }
+  }, async ({ project_path }) => {
+    try {
+      return jsonContent(await onboarding.bind({ project_path }));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("create_project", {
+    description: "Create a new empty Git project directory inside a configured project_root and register it as a read-only workspace. The call requires exact CREATE confirmation; only mkdir and git init are performed.",
+    inputSchema: {
+      parent: z.string().min(1),
+      name: z.string().min(1),
+      confirmation: z.literal("CREATE")
+    }
+  }, async ({ parent, name }) => {
+    try {
+      return jsonContent(await onboarding.create({ parent, name }));
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };
     }

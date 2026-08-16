@@ -53,6 +53,13 @@ function decodeTruncatedPrefix(chunks: readonly Buffer[]): string | undefined {
 function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {};
   for (const key of ENVIRONMENT_ALLOWLIST) if (host[key]) result[key] = host[key];
+  // Bridge owns the read-only boundary for its run_task calls. The host value
+  // is never forwarded (the allowlist drops it) and this constant override pins
+  // DSH's per-invocation sandbox policy (`sandboxPolicy.mode` reads
+  // `process.env.DSH_PERMISSION_MODE ?? 'workspace-write'`) to read-only for
+  // this child process only. Global DSH config and the headless profile are
+  // untouched.
+  result.DSH_PERMISSION_MODE = "read-only";
   return result;
 }
 

@@ -3,5 +3,9 @@
     "id": "example-project",
     "root": "/absolute/path/to/project",
     "allow_write": false
+  },
+  {
+    "kind": "project_root",
+    "root": "/absolute/path/to/projects"
   }
 ]

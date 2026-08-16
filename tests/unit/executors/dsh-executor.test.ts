@@ -129,7 +129,8 @@ test("uses the official headless interface with a fixed workspace and returns fi
     LANG: "en_US.UTF-8",
     LC_ALL: "C",
     USER: "tester",
-    LOGNAME: "tester-log"
+    LOGNAME: "tester-log",
+    DSH_PERMISSION_MODE: "read-only"
   });
   assert.equal(invocation.stdin.writableEnded, true);
 });
@@ -211,6 +212,45 @@ test("does not impose a sandbox policy before starting DSH", async () => {
 
   assert.deepEqual(result, { kind: "completed", output: "final answer" });
   assert.equal(invocations.length, 1);
+});
+
+test("pins DSH read-only permission mode and never forwards the host override or secrets", async () => {
+  const invocations: Invocation[] = [];
+  const hostEnvironment = {
+    PATH: "/test/bin",
+    HOME: "/home/test",
+    DSH_HOME: "/dsh/test",
+    DSH_PERMISSION_MODE: "workspace-write",
+    DEEPSEEK_API_KEY: "secret-api-key",
+    HTTP_PROXY: "secret-proxy"
+  };
+  const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({}, invocations), hostEnvironment);
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(result, { kind: "completed", output: "final answer" });
+  assert.equal(invocations.length, 1);
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal(invocation.options.env?.DSH_PERMISSION_MODE, "read-only");
+  assert.equal(invocation.options.env?.DEEPSEEK_API_KEY, undefined);
+  assert.equal(invocation.options.env?.HTTP_PROXY, undefined);
+  // The invocation itself is unchanged: same official headless interface.
+  assert.deepEqual(invocation.args, ["--profile", "headless", "inspect"]);
+});
+
+test("a host requesting danger-full-access cannot override the read-only run_task", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({}, invocations), {
+    PATH: "/test/bin",
+    HOME: "/home/test",
+    DSH_PERMISSION_MODE: "danger-full-access"
+  });
+
+  await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.equal(invocations.length, 1);
+  assert.equal(invocations[0]?.options.env?.DSH_PERMISSION_MODE, "read-only");
 });
 
 test("treats exactly 1 MiB of output as within the cap", async () => {
