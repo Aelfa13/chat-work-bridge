@@ -41,6 +41,7 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
     const listed = await client.listTools();
     assert.deepEqual(listed.tools.map(({ name }) => name).sort(), [
       "apply_controlled_patch",
+      "authorize_workspace_write",
       "bind_project",
       "control_task",
       "create_project",
@@ -306,6 +307,106 @@ test("bind_project fails closed when no project_root is configured", async () =>
       code: "WORKSPACE_BOUNDARY_VIOLATION",
       message: "The workspace boundary could not be verified."
     });
+  } finally {
+    await client.close();
+  }
+});
+
+test("authorize_workspace_write persists for managed workspaces and rejects manual ones", async () => {
+  const approved = mkdtempSync(join(tmpdir(), "engineering-bridge-authorize-"));
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-authorize-config-"));
+  const configPath = join(configDir, "workspaces.json");
+  const managedProject = join(approved, "managed-project");
+  const manualProject = join(approved, "manual-project");
+  mkdirSync(managedProject);
+  mkdirSync(manualProject);
+  writeFileSync(configPath, `${JSON.stringify([
+    { kind: "project_root", root: approved },
+    { id: "manual", root: manualProject, allow_write: true }
+  ], null, 2)}\n`);
+
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+
+  const call = async (name: string, args: Record<string, unknown>): Promise<{ isError: boolean; body: unknown }> => {
+    const result = await client.callTool({ name, arguments: args });
+    const content = result.content as ToolResult["content"];
+    const text = content[0]?.text ?? "";
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { raw: text };
+    }
+    return { isError: result.isError === true, body };
+  };
+
+  try {
+    await client.connect(transport);
+
+    const bound = await call("bind_project", {
+      project_path: managedProject,
+      confirmation: "BIND"
+    });
+    const workspaceId = (bound.body as { workspace_id?: string }).workspace_id;
+    assert.equal(typeof workspaceId, "string");
+
+    // AUTHORIZE a managed workspace: persisted in the catalog file.
+    const authorized = await call("authorize_workspace_write", {
+      workspace_id: workspaceId,
+      confirmation: "AUTHORIZE"
+    });
+    assert.equal(authorized.isError, false);
+    assert.deepEqual(authorized.body, { workspace_id: workspaceId, allow_write: true });
+    const catalogFile = `${configPath}.managed-workspaces.json`;
+    const catalog = JSON.parse(readFileSync(catalogFile, "utf8")) as { workspaces: Array<{ id: string; allow_write?: boolean }> };
+    assert.equal(catalog.workspaces.find(({ id }) => id === workspaceId)?.allow_write, true);
+
+    // Idempotent on repeat.
+    const again = await call("authorize_workspace_write", {
+      workspace_id: workspaceId,
+      confirmation: "AUTHORIZE"
+    });
+    assert.deepEqual(again.body, authorized.body);
+
+    // Manual workspaces stay authoritative through workspaces.json.
+    const manual = await call("authorize_workspace_write", {
+      workspace_id: "manual",
+      confirmation: "AUTHORIZE"
+    });
+    assert.equal(manual.isError, true);
+    assert.deepEqual(manual.body, {
+      error: {
+        code: "WORKSPACE_PRECONDITION_FAILED",
+        message: "The workspace preconditions were not met."
+      }
+    });
+
+    // Unknown workspaces are unchanged.
+    const missing = await call("authorize_workspace_write", {
+      workspace_id: "missing",
+      confirmation: "AUTHORIZE"
+    });
+    assert.equal(missing.isError, true);
+    assert.deepEqual(missing.body, {
+      error: {
+        code: "UNKNOWN_WORKSPACE",
+        message: "The requested workspace is not registered."
+      }
+    });
+
+    // Wrong confirmation is rejected by the schema.
+    const wrong = await call("authorize_workspace_write", {
+      workspace_id: workspaceId,
+      confirmation: "NO"
+    });
+    assert.equal(wrong.isError, true);
+    assert.equal(JSON.stringify(wrong.body).includes("allow_write"), false);
   } finally {
     await client.close();
   }

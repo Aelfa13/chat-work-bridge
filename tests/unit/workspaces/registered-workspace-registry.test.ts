@@ -142,3 +142,42 @@ test("manual roots that cannot be canonicalized fall back to the literal root wi
   });
   assert.equal(registry.resolve("known"), "/definitely/missing/path");
 });
+
+test("registerManaged restores a persisted allow_write flag", () => {
+  const registry = new RegisteredWorkspaceRegistry([]);
+  registry.registerManaged("managed-readonly", ROOT);
+  registry.registerManaged("managed-authorized", "/write/managed", true);
+
+  expectCode(() => registry.resolveWritable("managed-readonly"), "WORKSPACE_PRECONDITION_FAILED");
+  assert.equal(registry.resolveWritable("managed-authorized"), "/write/managed");
+});
+
+test("authorizeWrite grants controlled-write to managed workspaces idempotently", () => {
+  const registry = new RegisteredWorkspaceRegistry([]);
+  registry.registerManaged("managed-1", ROOT);
+  expectCode(() => registry.resolveWritable("managed-1"), "WORKSPACE_PRECONDITION_FAILED");
+
+  registry.authorizeWrite("managed-1");
+  assert.equal(registry.resolveWritable("managed-1"), ROOT);
+  registry.authorizeWrite("managed-1");
+  assert.equal(registry.resolveWritable("managed-1"), ROOT);
+});
+
+test("authorizeWrite rejects manual workspaces and unknown ids", () => {
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "manual", root: ROOT, allow_write: true }
+  ]);
+
+  expectCode(() => registry.authorizeWrite("manual"), "WORKSPACE_PRECONDITION_FAILED");
+  expectCode(() => registry.authorizeWrite("missing"), "UNKNOWN_WORKSPACE");
+  assert.equal(registry.resolveWritable("manual"), ROOT);
+});
+
+test("sourceOf distinguishes manual and managed registrations", () => {
+  const registry = new RegisteredWorkspaceRegistry([{ id: "manual", root: ROOT }]);
+  registry.registerManaged("managed-1", "/managed/root");
+
+  assert.equal(registry.sourceOf("manual"), "manual");
+  assert.equal(registry.sourceOf("managed-1"), "managed");
+  expectCode(() => registry.sourceOf("missing"), "UNKNOWN_WORKSPACE");
+});

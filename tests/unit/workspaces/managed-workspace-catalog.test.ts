@@ -29,8 +29,8 @@ test("loads an absent catalog as empty and round-trips registrations through the
   const reloaded = new ManagedWorkspaceCatalog(path);
   await reloaded.load();
   assert.deepEqual(reloaded.entries(), [
-    { id: first.id, root: "/canonical/a" },
-    { id: second.id, root: "/canonical/b" }
+    { id: first.id, root: "/canonical/a", allowWrite: false },
+    { id: second.id, root: "/canonical/b", allowWrite: false }
   ]);
   // Atomic writes leave no temporary files behind.
   assert.deepEqual(readdirSync(directory), ["managed-workspaces.json"]);
@@ -43,7 +43,7 @@ test("registerOnce returns the existing id for the same root without duplicating
 
   assert.equal(second.id, first.id);
   assert.equal(second.created, false);
-  assert.deepEqual(catalog.entries(), [{ id: first.id, root: "/canonical/a" }]);
+  assert.deepEqual(catalog.entries(), [{ id: first.id, root: "/canonical/a", allowWrite: false }]);
 });
 
 test("concurrent registerOnce calls for the same root converge on one id and one record", async () => {
@@ -61,7 +61,7 @@ test("concurrent registerOnce calls for the same root converge on one id and one
 
   const reloaded = new ManagedWorkspaceCatalog(path);
   await reloaded.load();
-  assert.deepEqual(reloaded.entries(), [{ id: first.id, root: "/canonical/same" }]);
+  assert.deepEqual(reloaded.entries(), [{ id: first.id, root: "/canonical/same", allowWrite: false }]);
 });
 
 test("a persist failure rolls back the in-memory record and allows a later retry", async () => {
@@ -79,7 +79,7 @@ test("a persist failure rolls back the in-memory record and allows a later retry
   assert.equal(retried.created, true);
   const reloaded = new ManagedWorkspaceCatalog(path);
   await reloaded.load();
-  assert.deepEqual(reloaded.entries(), [{ id: retried.id, root: "/canonical/x" }]);
+  assert.deepEqual(reloaded.entries(), [{ id: retried.id, root: "/canonical/x", allowWrite: false }]);
 });
 
 test("skips individually invalid records and rejects a corrupt whole file", async () => {
@@ -98,7 +98,7 @@ test("skips individually invalid records and rejects a corrupt whole file", asyn
   const catalog = new ManagedWorkspaceCatalog(path);
   await catalog.load();
   assert.deepEqual(catalog.entries(), [
-    { id: "00000000-0000-4000-8000-000000000002", root: "/canonical/ok" }
+    { id: "00000000-0000-4000-8000-000000000002", root: "/canonical/ok", allowWrite: false }
   ]);
 
   writeFileSync(path, "not json at all");
@@ -112,5 +112,86 @@ test("a catalog without a state file path stays process-local", async () => {
   const catalog = new ManagedWorkspaceCatalog(undefined);
   await catalog.load();
   const { id } = await catalog.registerOnce("/canonical/local");
-  assert.deepEqual(catalog.entries(), [{ id, root: "/canonical/local" }]);
+  assert.deepEqual(catalog.entries(), [{ id, root: "/canonical/local", allowWrite: false }]);
+});
+
+test("loads pre-authorization v1 records as read-only and round-trips authorized records", async () => {
+  const path = catalogPath();
+  writeFileSync(path, `${JSON.stringify({
+    version: 1,
+    workspaces: [
+      { id: "00000000-0000-4000-8000-000000000001", root: "/canonical/old" },
+      { id: "00000000-0000-4000-8000-000000000002", root: "/canonical/authorized", allow_write: true }
+    ]
+  }, null, 2)}\n`);
+
+  const catalog = new ManagedWorkspaceCatalog(path);
+  await catalog.load();
+  assert.deepEqual(catalog.entries(), [
+    { id: "00000000-0000-4000-8000-000000000001", root: "/canonical/old", allowWrite: false },
+    { id: "00000000-0000-4000-8000-000000000002", root: "/canonical/authorized", allowWrite: true }
+  ]);
+
+  const reloaded = new ManagedWorkspaceCatalog(path);
+  await reloaded.load();
+  assert.deepEqual(reloaded.entries(), catalog.entries());
+});
+
+test("registerOnce records stay read-only until authorize flips the record persistently", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bridge-catalog-auth-"));
+  const path = join(directory, "managed-workspaces.json");
+  const catalog = new ManagedWorkspaceCatalog(path);
+  await catalog.load();
+  const { id } = await catalog.registerOnce("/canonical/auth");
+  assert.equal(catalog.entries()[0]?.allowWrite, false);
+
+  await catalog.authorize("/canonical/auth");
+  assert.equal(catalog.entries()[0]?.allowWrite, true);
+
+  const reloaded = new ManagedWorkspaceCatalog(path);
+  await reloaded.load();
+  assert.deepEqual(reloaded.entries(), [{ id, root: "/canonical/auth", allowWrite: true }]);
+});
+
+test("authorize is idempotent and unknown roots fail closed", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bridge-catalog-idem-"));
+  const path = join(directory, "managed-workspaces.json");
+  const catalog = new ManagedWorkspaceCatalog(path);
+  await catalog.load();
+  await catalog.registerOnce("/canonical/idem");
+
+  await catalog.authorize("/canonical/idem");
+  await catalog.authorize("/canonical/idem");
+  assert.equal(catalog.entries()[0]?.allowWrite, true);
+  await expectCode(() => catalog.authorize("/canonical/unknown"), "INTERNAL_ERROR");
+  assert.equal(readdirSync(directory).length, 1); // no extra temporary files
+});
+
+test("concurrent authorize calls converge and a persist failure rolls back the in-memory record", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "bridge-catalog-conc-"));
+  const path = join(directory, "managed-workspaces.json");
+  const catalog = new ManagedWorkspaceCatalog(path);
+  await catalog.load();
+  await catalog.registerOnce("/canonical/concurrent");
+
+  await Promise.all([
+    catalog.authorize("/canonical/concurrent"),
+    catalog.authorize("/canonical/concurrent")
+  ]);
+  assert.equal(catalog.entries()[0]?.allowWrite, true);
+
+  // Replace the state file with a directory so the atomic rename fails.
+  const blockedPath = join(directory, "blocked.json");
+  const blocked = new ManagedWorkspaceCatalog(blockedPath);
+  await blocked.load();
+  await blocked.registerOnce("/canonical/blocked");
+  rmSync(blockedPath);
+  mkdirSync(blockedPath);
+  await expectCode(() => blocked.authorize("/canonical/blocked"), "INTERNAL_ERROR");
+  assert.equal(blocked.entries()[0]?.allowWrite, false);
+
+  // The same catalog can authorize once the blocker is gone.
+  rmSync(blockedPath, { recursive: true, force: true });
+  await blocked.authorize("/canonical/blocked");
+  assert.equal(blocked.entries()[0]?.allowWrite, true);
 });

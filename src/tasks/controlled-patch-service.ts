@@ -15,10 +15,18 @@ export type GitStarter = (
   options: SpawnOptionsWithoutStdio
 ) => ChildProcessWithoutNullStreams;
 
+// Minimal exit-code-observing git result: the caller must be able to tell a
+// genuine failure from an expected nonzero exit (HEAD detection only).
+type GitExit = { readonly code: number; readonly stdout: string };
+
+export type ProposalBase =
+  | { readonly kind: "commit"; readonly head: string }
+  | { readonly kind: "unborn" };
+
 type Proposal = {
   workspaceId: string;
   workspaceRoot: string;
-  baseHead: string;
+  base: ProposalBase;
   state: "proposed" | "applying" | "applied";
   parentTaskId: Id | undefined;
   output: string | undefined;
@@ -30,22 +38,35 @@ type RetainedState = { proposals: RetainedProposal[]; appliedTaskIds: Id[] };
 const CONTROLLED_PATCH_STATE_VERSION = 1;
 const MAX_APPLIED_PROPOSAL_HISTORY = 100;
 
-const PATCH_INSTRUCTION = (changeRequest: string): string => `You are preparing a proposed change for human review. The workspace is read-only.
-Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.
+const PATCH_INSTRUCTION = (changeRequest: string, base: ProposalBase): string => {
+  const scope = base.kind === "unborn"
+    ? "The workspace is a newly created Git repository with no commits yet (unborn repository state). There are no tracked files to modify, so the proposed change must only add ordinary text files using new file mode 100644."
+    : "Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.";
+  return `You are preparing a proposed change for human review. The workspace is read-only.
+Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. ${scope}
 
 Change request:
 ${changeRequest}`;
+};
 
-const REFINEMENT_INSTRUCTION = (baseHead: string, sourceDiff: string, changeRequest: string): string => `You are refining a proposed change for human review. The workspace is read-only.
-Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.
+const REFINEMENT_INSTRUCTION = (base: ProposalBase, sourceDiff: string, changeRequest: string): string => {
+  const baseClause = base.kind === "commit"
+    ? `Output a COMPLETE final unified diff relative to the SAME original base_head ${base.head}, not an incremental patch against the source proposal.`
+    : "The workspace is a newly created Git repository with no commits yet (unborn repository state); the refined proposal must still only add ordinary text files using new file mode 100644, and must remain relative to the same unborn base.";
+  const scope = base.kind === "unborn"
+    ? "There are no tracked files to modify, so the proposed change must only add ordinary text files using new file mode 100644."
+    : "Modify existing tracked regular text files, or add ordinary text files using new file mode 100644.";
+  return `You are refining a proposed change for human review. The workspace is read-only.
+Return only a unified textual Git diff for the requested change, beginning with "diff --git". Do not use Markdown fences or commentary. Do not include binary patches, deletions, renames or copies, mode changes, symlinks, or submodules. ${scope}
 
-Treat the source proposal below as the reviewed baseline. Fix only the requested issues and preserve all unrelated proposal semantics. Output a COMPLETE final unified diff relative to the SAME original base_head ${baseHead}, not an incremental patch against the source proposal. Do not redo the original task.
+Treat the source proposal below as the reviewed baseline. Fix only the requested issues and preserve all unrelated proposal semantics. ${baseClause} Do not redo the original task.
 
 Complete source proposal diff:
 ${sourceDiff}
 
 Refinement request:
 ${changeRequest}`;
+};
 
 export class ControlledPatchService {
   private readonly proposals = new Map<Id, Proposal>();
@@ -75,7 +96,7 @@ export class ControlledPatchService {
     try {
       retainedState = parseRetainedState(JSON.parse(source));
       for (const proposal of retainedState.proposals) {
-        if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
+        if (this.registry.resolve(proposal.workspaceId) !== proposal.workspaceRoot) {
           throw new CoreError("INTERNAL_ERROR");
         }
       }
@@ -91,23 +112,26 @@ export class ControlledPatchService {
     this.appliedProposalTaskIds = retainedState.appliedTaskIds;
   }
 
-  async generate(request: { workspace_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string }> {
-    const workspaceRoot = this.registry.resolveWritable(request.workspace_id);
-    const baseHead = await this.verifyWorkspace(workspaceRoot);
-    return this.startProposal(request.workspace_id, workspaceRoot, baseHead, PATCH_INSTRUCTION(request.change_request));
+  async generate(request: { workspace_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string | null }> {
+    // Generating a proposal is read-only analysis: any registered workspace
+    // may propose; only APPLY requires controlled-write authorization.
+    const workspaceRoot = this.registry.resolve(request.workspace_id);
+    const base = await this.verifyWorkspace(workspaceRoot);
+    return this.startProposal(request.workspace_id, workspaceRoot, base,
+      PATCH_INSTRUCTION(request.change_request, base));
   }
 
-  async refine(request: { patch_task_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string }> {
+  async refine(request: { patch_task_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string | null }> {
     const proposal = this.proposals.get(request.patch_task_id as Id);
     const sourceResult = this.tasks.result(request.patch_task_id);
     if (proposal === undefined || sourceResult === undefined || sourceResult.state !== "completed") {
       throw new CoreError("INVALID_STATE_TRANSITION");
     }
 
-    const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
-    if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    return this.startProposal(proposal.workspaceId, proposal.workspaceRoot, proposal.baseHead,
-      REFINEMENT_INSTRUCTION(proposal.baseHead, sourceResult.output, request.change_request),
+    const currentBase = await this.verifyWorkspace(proposal.workspaceRoot);
+    if (!sameBase(currentBase, proposal.base)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    return this.startProposal(proposal.workspaceId, proposal.workspaceRoot, proposal.base,
+      REFINEMENT_INSTRUCTION(proposal.base, sourceResult.output, request.change_request),
       request.patch_task_id as Id);
   }
 
@@ -121,6 +145,11 @@ export class ControlledPatchService {
     if (proposal === undefined || proposal.state !== "proposed") {
       throw new CoreError("INVALID_STATE_TRANSITION");
     }
+    // APPLY is the single controlled-write authorization checkpoint: the
+    // workspace must currently hold controlled-write permission.
+    if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
     const result = this.tasks.result(request.patch_task_id);
     if (result === undefined || result.state !== "completed") {
       throw new CoreError("INVALID_STATE_TRANSITION");
@@ -129,16 +158,24 @@ export class ControlledPatchService {
     proposal.state = "applying";
     try {
       await this.persist();
-      const currentHead = await this.verifyWorkspace(proposal.workspaceRoot);
-      if (currentHead !== proposal.baseHead) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      const currentBase = await this.verifyWorkspace(proposal.workspaceRoot);
+      // Unborn proposals require the repository to still be unborn: if the user
+      // created the first commit meanwhile, this proposal must be rejected.
+      if (!sameBase(currentBase, proposal.base)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       const targets = parsePatch(result.output);
       for (const target of targets) {
-        const entry = await this.git(proposal.workspaceRoot, ["ls-tree", proposal.baseHead, "--", target.path]);
-        if (target.kind === "modified") {
-          if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) failPatch();
-          continue;
+        if (proposal.base.kind === "unborn") {
+          // No tracked files exist in an unborn repository, so only pure
+          // additions are verifiable; modified targets cannot be checked.
+          if (target.kind !== "added") failPatch();
+        } else {
+          const entry = await this.git(proposal.workspaceRoot, ["ls-tree", proposal.base.head, "--", target.path]);
+          if (target.kind === "modified") {
+            if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) failPatch();
+            continue;
+          }
+          if (entry.length !== 0) failPatch();
         }
-        if (entry.length !== 0) failPatch();
         const indexEntry = await this.git(proposal.workspaceRoot, ["ls-files", "--stage", "--", target.path]);
         if (indexEntry.length !== 0 || await pathExists(resolve(proposal.workspaceRoot, target.path))) failPatch();
       }
@@ -162,10 +199,10 @@ export class ControlledPatchService {
   private startProposal(
     workspaceId: string,
     workspaceRoot: string,
-    baseHead: string,
+    base: ProposalBase,
     instruction: string,
     parentTaskId?: Id
-  ): { taskId: Id; baseHead: string } {
+  ): { taskId: Id; baseHead: string | null } {
     const { taskId } = this.tasks.runTask({
       workspace_id: workspaceId,
       instruction
@@ -189,13 +226,13 @@ export class ControlledPatchService {
     this.proposals.set(taskId, {
       workspaceId,
       workspaceRoot,
-      baseHead,
+      base,
       state: "proposed",
       parentTaskId,
       output: undefined
     });
     this.tasks.pinTask(taskId);
-    return { taskId, baseHead };
+    return { taskId, baseHead: base.kind === "commit" ? base.head : null };
   }
 
   private trimAppliedProposals(): void {
@@ -219,7 +256,8 @@ export class ControlledPatchService {
         task_id: taskId,
         workspace_id: proposal.workspaceId,
         workspace_root: proposal.workspaceRoot,
-        base_head: proposal.baseHead,
+        base_head: proposal.base.kind === "commit" ? proposal.base.head : null,
+        ...(proposal.base.kind === "unborn" ? { unborn: true } : {}),
         state: proposal.state,
         ...(proposal.parentTaskId === undefined ? {} : { parent_task_id: proposal.parentTaskId }),
         output: proposal.output
@@ -247,7 +285,7 @@ export class ControlledPatchService {
     }
   }
 
-  private async verifyWorkspace(workspaceRoot: string): Promise<string> {
+  private async verifyWorkspace(workspaceRoot: string): Promise<ProposalBase> {
     const topLevel = (await this.git(workspaceRoot, ["rev-parse", "--show-toplevel"])).trim();
     let canonicalTopLevel: string;
     let canonicalWorkspaceRoot: string;
@@ -262,9 +300,36 @@ export class ControlledPatchService {
     if (canonicalTopLevel !== canonicalWorkspaceRoot) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     const status = await this.git(workspaceRoot, ["status", "--porcelain", "--untracked-files=no"]);
     if (status.length !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    const head = (await this.git(workspaceRoot, ["rev-parse", "HEAD"])).trim();
-    if (!/^[0-9a-f]{40,64}$/u.test(head)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    return head;
+    return this.detectBase(workspaceRoot);
+  }
+
+  // Distinguishes the three possible HEAD states without ever inferring "unborn"
+  // from a bare nonzero exit or a catch-all failure. A repository is genuinely
+  // unborn only when all of the following hold (stable, machine-decidable Git
+  // primitives):
+  //   1. `git rev-parse --verify --quiet HEAD` exits non-zero: HEAD does not
+  //      resolve to a commit.
+  //   2. `git symbolic-ref --quiet HEAD` exits zero and names a refs/heads/<branch>
+  //      ref: HEAD is a symbolic branch ref, not detached, malformed, or absent.
+  //   3. `git rev-parse --verify --quiet refs/heads/<branch>` exits non-zero:
+  //      that branch has no commit yet (unborn branch state).
+  // Any other combination — spawn/IO failures, detached or non-branch HEAD, or a
+  // branch that resolves while HEAD does not — fails closed as
+  // WORKSPACE_PRECONDITION_FAILED instead of being guessed as unborn.
+  private async detectBase(workspaceRoot: string): Promise<ProposalBase> {
+    const head = await this.gitResult(workspaceRoot, ["rev-parse", "--verify", "--quiet", "HEAD"]);
+    if (head.code === 0) {
+      const value = head.stdout.trim();
+      if (!/^[0-9a-f]{40,64}$/u.test(value)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      return { kind: "commit", head: value };
+    }
+    const symbolicRef = await this.gitResult(workspaceRoot, ["symbolic-ref", "--quiet", "HEAD"]);
+    if (symbolicRef.code !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    const branch = symbolicRef.stdout.trim();
+    if (!/^refs\/heads\/[^\s]+$/u.test(branch)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    const branchHead = await this.gitResult(workspaceRoot, ["rev-parse", "--verify", "--quiet", branch]);
+    if (branchHead.code === 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    return { kind: "unborn" };
   }
 
   private git(cwd: string, args: readonly string[], input?: string): Promise<string> {
@@ -288,6 +353,30 @@ export class ControlledPatchService {
       child.stdin.end(input);
     });
   }
+
+  // Exit-code-observing sibling of git(), used only for HEAD detection: it
+  // resolves with the exit code and stdout instead of rejecting on nonzero, so
+  // detectBase can prove the unborn state instead of assuming it. All other
+  // calls keep using git(), which rejects on any nonzero exit.
+  private gitResult(cwd: string, args: readonly string[], input?: string): Promise<GitExit> {
+    return new Promise((resolveOutput, reject) => {
+      let child: ChildProcessWithoutNullStreams;
+      try {
+        child = this.startProcess("git", args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"] });
+      } catch {
+        reject(new CoreError("WORKSPACE_PRECONDITION_FAILED"));
+        return;
+      }
+      let stdout = "";
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
+      child.stderr.resume();
+      child.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
+      child.on("close", (code) => resolveOutput({ code: code ?? -1, stdout }));
+      child.stdin.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
+      child.stdin.end(input);
+    });
+  }
 }
 
 function parseRetainedState(value: unknown): RetainedState {
@@ -300,7 +389,7 @@ function parseRetainedState(value: unknown): RetainedState {
     if (!isObject(item) || !isId(item.task_id) ||
         typeof item.workspace_id !== "string" || item.workspace_id.length === 0 ||
         typeof item.workspace_root !== "string" ||
-        typeof item.base_head !== "string" || !/^[0-9a-f]{40,64}$/u.test(item.base_head) ||
+        (item.unborn !== undefined && typeof item.unborn !== "boolean") ||
         !["proposed", "applying", "applied"].includes(item.state as string) ||
         (item.parent_task_id !== undefined && !isId(item.parent_task_id)) ||
         typeof item.output !== "string") {
@@ -310,7 +399,7 @@ function parseRetainedState(value: unknown): RetainedState {
       taskId: item.task_id,
       workspaceId: item.workspace_id,
       workspaceRoot: item.workspace_root,
-      baseHead: item.base_head,
+      base: parseProposalBase(item),
       state: item.state as Proposal["state"],
       parentTaskId: item.parent_task_id as Id | undefined,
       output: item.output
@@ -328,7 +417,8 @@ function parseRetainedState(value: unknown): RetainedState {
     if (proposal.parentTaskId === undefined) continue;
     const parent = byTaskId.get(proposal.parentTaskId);
     if (parent !== undefined && (parent.workspaceId !== proposal.workspaceId ||
-        parent.workspaceRoot !== proposal.workspaceRoot || parent.baseHead !== proposal.baseHead)) {
+        parent.workspaceRoot !== proposal.workspaceRoot ||
+        !sameBase(proposal.base, parent.base))) {
       throw new CoreError("INTERNAL_ERROR");
     }
   }
@@ -412,4 +502,24 @@ function safePath(path: string): boolean {
 
 function failPatch(): never {
   throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+}
+
+// Strictly parses the persisted base-state fields. A proposal base is either a
+// real commit (base_head = <hex>, unborn absent/false) or the unborn repository
+// state (base_head = null, unborn = true); every other combination is invalid
+// retained state and is rejected like the existing invalid-record handling.
+function parseProposalBase(item: Record<string, unknown>): ProposalBase {
+  if (item.unborn === true) {
+    if (item.base_head !== null) throw new CoreError("INTERNAL_ERROR");
+    return { kind: "unborn" };
+  }
+  if (typeof item.base_head !== "string" || !/^[0-9a-f]{40,64}$/u.test(item.base_head)) {
+    throw new CoreError("INTERNAL_ERROR");
+  }
+  return { kind: "commit", head: item.base_head };
+}
+
+function sameBase(current: ProposalBase, expected: ProposalBase): boolean {
+  if (current.kind === "unborn") return expected.kind === "unborn";
+  return expected.kind === "commit" && current.head === expected.head;
 }

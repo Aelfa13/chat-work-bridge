@@ -86,7 +86,7 @@ export class RegisteredWorkspaceRegistry {
     };
   }
 
-  registerManaged(id: string, root: string): void {
+  registerManaged(id: string, root: string, allowWrite = false): void {
     const existing = this.registrations.get(id);
     if (existing !== undefined) {
       if (existing.root === root) return;
@@ -94,8 +94,23 @@ export class RegisteredWorkspaceRegistry {
     }
     const canonicalRoot = this.canonicalize(root);
     if (this.canonicalRoots.has(canonicalRoot)) throw new CoreError("WORKSPACE_BOUNDARY_VIOLATION");
-    this.registrations.set(id, { root, canonicalRoot, allowWrite: false, source: "managed" });
+    this.registrations.set(id, { root, canonicalRoot, allowWrite, source: "managed" });
     this.canonicalRoots.set(canonicalRoot, id);
+  }
+
+  sourceOf(workspaceId: string): "manual" | "managed" {
+    const registration = this.registrations.get(workspaceId);
+    if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
+    return registration.source;
+  }
+
+  // Grants controlled-write authorization for one managed workspace. Manual
+  // workspaces stay authoritative through workspaces.json only. Idempotent.
+  authorizeWrite(workspaceId: string): void {
+    const registration = this.registrations.get(workspaceId);
+    if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
+    if (registration.source !== "managed") throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    registration.allowWrite = true;
   }
 }
 

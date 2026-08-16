@@ -8,6 +8,7 @@ import type { Id } from "../core/ids.js";
 export interface ManagedWorkspaceRecord {
   readonly id: Id;
   readonly root: string;
+  readonly allowWrite: boolean;
 }
 
 const MANAGED_WORKSPACES_VERSION = 1;
@@ -43,17 +44,19 @@ export class ManagedWorkspaceCatalog {
 
     for (const item of value.workspaces) {
       if (!isObject(item)) continue;
-      const { id, root } = item;
+      const { id, root, allow_write } = item;
       if (typeof id !== "string" || !isId(id) ||
           typeof root !== "string" || root.length === 0 ||
-          !isAbsolute(root) || normalize(root) !== root) {
+          !isAbsolute(root) || normalize(root) !== root ||
+          (allow_write !== undefined && typeof allow_write !== "boolean")) {
         continue; // Skip individually invalid records.
       }
       if ([...this.records.values()].some((record) => record.id === id) ||
           this.records.has(root)) {
         continue; // Skip duplicate ids or roots.
       }
-      this.records.set(root, { id, root });
+      // Records without allow_write are pre-authorization v1 entries: read-only.
+      this.records.set(root, { id, root, allowWrite: allow_write ?? false });
     }
   }
 
@@ -68,7 +71,7 @@ export class ManagedWorkspaceCatalog {
       const id = newId();
       const snapshot = this.records;
       this.records = new Map(snapshot);
-      this.records.set(root, { id, root });
+      this.records.set(root, { id, root, allowWrite: false });
       try {
         await this.persist();
       } catch {
@@ -81,11 +84,37 @@ export class ManagedWorkspaceCatalog {
     return mutation;
   }
 
+  // Grants persistent controlled-write authorization for one managed workspace.
+  // Runs inside the same mutation queue as registration so concurrent calls are
+  // serialized and idempotent; a persist failure rolls back the in-memory record.
+  authorize(root: string): Promise<void> {
+    const mutation = this.mutationQueue.then(async (): Promise<void> => {
+      const record = this.records.get(root);
+      if (record === undefined) throw new CoreError("INTERNAL_ERROR");
+      if (record.allowWrite) return;
+      const snapshot = this.records;
+      this.records = new Map(snapshot);
+      this.records.set(root, { ...record, allowWrite: true });
+      try {
+        await this.persist();
+      } catch {
+        this.records = snapshot;
+        throw new CoreError("INTERNAL_ERROR");
+      }
+    });
+    this.mutationQueue = mutation.then(() => undefined, () => undefined);
+    return mutation;
+  }
+
   private persist(): Promise<void> {
     if (this.stateFilePath === undefined) return Promise.resolve();
     const contents = `${JSON.stringify({
       version: MANAGED_WORKSPACES_VERSION,
-      workspaces: [...this.records.values()].map(({ id, root }) => ({ id, root }))
+      workspaces: [...this.records.values()].map(({ id, root, allowWrite }) => ({
+        id,
+        root,
+        allow_write: allowWrite
+      }))
     }, null, 2)}\n`;
     return this.writeStateFile(contents);
   }

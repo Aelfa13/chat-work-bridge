@@ -81,6 +81,19 @@ export class WorkspaceOnboardingService {
     };
   }
 
+  async authorizeWrite(workspaceId: string): Promise<{ workspace_id: string; allow_write: true }> {
+    const root = this.registry.resolve(workspaceId);
+    if (this.registry.sourceOf(workspaceId) !== "managed") {
+      // Manual workspaces stay authoritative through workspaces.json only.
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    // Persist first, then update the runtime registry: a failed persist leaves
+    // no half-authorized runtime state, and the registry update cannot fail.
+    await this.catalog.authorize(root);
+    this.registry.authorizeWrite(workspaceId);
+    return { workspace_id: workspaceId, allow_write: true };
+  }
+
   private async canonicalizeWithinApprovedRoot(path: string): Promise<string> {
     let canonical: string;
     try {

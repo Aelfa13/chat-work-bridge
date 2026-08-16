@@ -72,7 +72,7 @@ async function main(): Promise<void> {
   await catalog.load();
   for (const entry of catalog.entries()) {
     try {
-      registry.registerManaged(entry.id, entry.root);
+      registry.registerManaged(entry.id, entry.root, entry.allowWrite);
     } catch {
       // A manual or earlier managed registration already owns the id or root.
     }
@@ -171,8 +171,22 @@ async function main(): Promise<void> {
     }
   });
 
+  server.registerTool("authorize_workspace_write", {
+    description: "Grant persistent controlled-write authorization to a managed workspace after exact AUTHORIZE confirmation. Manual workspaces remain authoritative through workspaces.json. Ordinary run_task calls stay read-only.",
+    inputSchema: {
+      workspace_id: z.string().min(1),
+      confirmation: z.literal("AUTHORIZE")
+    }
+  }, async ({ workspace_id }) => {
+    try {
+      return jsonContent(await onboarding.authorizeWrite(workspace_id));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
   server.registerTool("generate_controlled_patch", {
-    description: "Generate a read-only patch proposal for review in a write-enabled Git workspace; it does not apply changes.",
+    description: "Generate a read-only patch proposal for review in any registered Git workspace; generation requires no write authorization, and controlled-write authorization is required only to APPLY.",
     inputSchema: {
       workspace_id: z.string().min(1),
       change_request: z.string().min(1)
