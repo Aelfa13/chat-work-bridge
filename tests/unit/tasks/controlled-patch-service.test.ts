@@ -804,7 +804,7 @@ test("rejects unborn modified targets and targets that already exist as untracke
   await expectCode(() => conflicting.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" }), "WORKSPACE_PRECONDITION_FAILED");
 });
 
-test("retained-state loader accepts old and new commit bases and rejects illegal base combinations", async () => {
+test("retained-state loader accepts old and new commit bases and quarantines illegal base combinations", async () => {
   const root = repository();
   const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
   const head = git(root, "rev-parse", "HEAD").trim();
@@ -878,7 +878,9 @@ test("retained-state loader accepts old and new commit bases and rejects illegal
 
   for (const [baseHead, unborn] of [[null, false], [head, true], [null, undefined]] as const) {
     // JSON.stringify drops the undefined key: [null, undefined] is exactly the
-    // "base_head null with no unborn field" illegal combination.
+    // "base_head null with no unborn field" illegal combination. Each illegal
+    // base makes only that proposal unrecoverable, so it is quarantined while
+    // the rest of the state still loads.
     writeFileSync(stateFilePath, `${JSON.stringify({
       version: 1,
       applied_task_ids: [],
@@ -894,7 +896,9 @@ test("retained-state loader accepts old and new commit bases and rejects illegal
     }, null, 2)}\n`);
     const invalidTasks = new RegisteredWorkspaceTaskService(registry, () => ({ execute: async () => ({ kind: "completed", output: validPatch }) }));
     const invalid = new ControlledPatchService(registry, invalidTasks, undefined, stateFilePath);
-    await expectCode(() => invalid.load(), "INTERNAL_ERROR");
+    await invalid.load();
+    const proposals = (invalid as unknown as { proposals: Map<string, unknown> }).proposals;
+    assert.equal(proposals.has("00000000-0000-4000-8000-000000000003"), false);
   }
 });
 
@@ -1019,4 +1023,442 @@ test("HEAD detection fails closed: a non-branch symbolic HEAD is not inferred as
     () => controlled.generate({ workspace_id: "workspace", change_request: "add file" }),
     "WORKSPACE_PRECONDITION_FAILED"
   );
+});
+
+function retainedRecord(
+  taskId: string,
+  root: string,
+  head: string,
+  overrides: Record<string, unknown> = {}
+): Record<string, unknown> {
+  return {
+    task_id: taskId,
+    workspace_id: "workspace",
+    workspace_root: root,
+    base_head: head,
+    state: "proposed",
+    output: validPatch,
+    ...overrides
+  };
+}
+
+function writeRetainedState(stateFilePath: string, state: unknown): void {
+  writeFileSync(stateFilePath, `${JSON.stringify(state, null, 2)}\n`);
+}
+
+test("quarantines a single malformed proposal field while restoring the valid proposal", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const goodId = "00000000-0000-4000-8000-000000000001";
+  const badId = "00000000-0000-4000-8000-000000000002";
+  const badVariants: Array<Record<string, unknown>> = [
+    { state: "bogus" },
+    { output: 42 },
+    { base_head: "not-a-hex" },
+    { unborn: "yes" },
+    { workspace_id: "" },
+    { workspace_root: 42 },
+    { parent_task_id: "not-a-uuid" }
+  ];
+
+  for (const badFields of badVariants) {
+    const stateFilePath = retainedStateFile();
+    writeRetainedState(stateFilePath, {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [
+        retainedRecord(goodId, root, head),
+        retainedRecord(badId, root, head, badFields)
+      ]
+    });
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await controlled.load();
+
+    const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+    assert.deepEqual([...proposals.keys()], [goodId]);
+    assert.equal(tasks.taskView(goodId)?.state, "completed");
+    // The quarantined record is unreachable through every proposal surface.
+    assert.equal(tasks.taskView(badId), undefined);
+    assert.equal(tasks.result(badId), undefined);
+    await expectCode(() => controlled.refine({
+      patch_task_id: badId,
+      change_request: "improve"
+    }), "INVALID_STATE_TRANSITION");
+    await expectCode(() => controlled.apply({
+      patch_task_id: badId,
+      confirmation: "APPLY"
+    }), "INVALID_STATE_TRANSITION");
+  }
+});
+
+test("quarantines a proposal with an invalid task id without touching the valid proposals", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [
+      retainedRecord("00000000-0000-4000-8000-000000000001", root, head),
+      retainedRecord("not-a-uuid", root, head),
+      retainedRecord("00000000-0000-4000-8000-000000000003", root, head)
+    ]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.deepEqual(
+    [...proposals.keys()],
+    ["00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000003"]
+  );
+  assert.equal(proposals.size, 2);
+});
+
+test("quarantines proposals whose workspace is unregistered or whose root moved, keeping the rest", async () => {
+  const root = repository();
+  const other = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const otherHead = git(other, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [
+      retainedRecord("00000000-0000-4000-8000-000000000001", root, head),
+      // Unregistered workspace: registry.resolve throws UNKNOWN_WORKSPACE.
+      retainedRecord("00000000-0000-4000-8000-000000000002", other, otherHead, { workspace_id: "ghost" }),
+      // Registered id whose persisted root no longer matches the registry.
+      retainedRecord("00000000-0000-4000-8000-000000000003", other, otherHead)
+    ]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.deepEqual([...proposals.keys()], ["00000000-0000-4000-8000-000000000001"]);
+  assert.equal(tasks.taskView("00000000-0000-4000-8000-000000000001")?.state, "completed");
+  for (const skipped of ["00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003"]) {
+    assert.equal(proposals.has(skipped), false);
+    assert.equal(tasks.taskView(skipped), undefined);
+    await expectCode(() => controlled.apply({ patch_task_id: skipped, confirmation: "APPLY" }), "INVALID_STATE_TRANSITION");
+  }
+});
+
+test("a single bad proposal record does not prevent Bridge startup", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  const badStates: unknown[] = [
+    { version: 1, applied_task_ids: [], proposals: [retainedRecord("00000000-0000-4000-8000-000000000001", root, head, { output: 42 })] },
+    { version: 1, applied_task_ids: [], proposals: [null] }
+  ];
+  for (const state of badStates) {
+    writeRetainedState(stateFilePath, state);
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await controlled.load();
+
+    const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+    assert.equal(proposals.size, 0);
+    const appliedProposalTaskIds = (controlled as unknown as { appliedProposalTaskIds: string[] }).appliedProposalTaskIds;
+    assert.deepEqual(appliedProposalTaskIds, []);
+  }
+});
+
+test("drops the applied history entry of a quarantined applied proposal and keeps the rest not re-appliable", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const badAppliedId = "00000000-0000-4000-8000-000000000001";
+  const goodAppliedId = "00000000-0000-4000-8000-000000000002";
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [badAppliedId, goodAppliedId],
+    proposals: [
+      // Malformed output makes this applied record unrecoverable: it and its
+      // applied_task_ids entry are quarantined together.
+      retainedRecord(badAppliedId, root, head, { state: "applied", output: 42 }),
+      retainedRecord(goodAppliedId, root, head, { state: "applied" })
+    ]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const proposals = (controlled as unknown as { proposals: Map<string, { state: string }> }).proposals;
+  assert.deepEqual([...proposals.keys()], [goodAppliedId]);
+  assert.equal(proposals.get(goodAppliedId)?.state, "applied");
+  const appliedProposalTaskIds = (controlled as unknown as { appliedProposalTaskIds: string[] }).appliedProposalTaskIds;
+  assert.deepEqual(appliedProposalTaskIds, [goodAppliedId]);
+  // The surviving applied proposal must not become re-appliable.
+  await expectCode(() => controlled.apply({
+    patch_task_id: goodAppliedId,
+    confirmation: "APPLY"
+  }), "INVALID_STATE_TRANSITION");
+});
+
+test("retained state fails closed: unsupported version and invalid top-level structure", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  const invalidStates: unknown[] = [
+    { version: 2, applied_task_ids: [], proposals: [retainedRecord("00000000-0000-4000-8000-000000000001", root, head)] },
+    { version: 1, proposals: [] },
+    { version: 1, applied_task_ids: [], proposals: "nope" }
+  ];
+  for (const state of invalidStates) {
+    writeRetainedState(stateFilePath, state);
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+  }
+});
+
+test("retained state fails closed: applied_task_ids itself is invalid", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const stateFilePath = retainedStateFile();
+  const invalidAppliedLists: unknown[] = [
+    "nope",
+    [123],
+    ["not-a-uuid"],
+    [
+      "00000000-0000-4000-8000-000000000001",
+      "00000000-0000-4000-8000-000000000001"
+    ]
+  ];
+  for (const appliedTaskIds of invalidAppliedLists) {
+    writeRetainedState(stateFilePath, { version: 1, applied_task_ids: appliedTaskIds, proposals: [] });
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+  }
+});
+
+test("retained state fails closed: duplicate proposal task ids are ambiguous even with a broken duplicate", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  const duplicateStates: unknown[] = [
+    // Two otherwise valid records with the same task id.
+    {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [
+        retainedRecord("00000000-0000-4000-8000-000000000001", root, head),
+        retainedRecord("00000000-0000-4000-8000-000000000001", root, head)
+      ]
+    },
+    // One broken duplicate could claim a different applied state than the
+    // valid record, so the duplicate id always fails closed.
+    {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [
+        retainedRecord("00000000-0000-4000-8000-000000000001", root, head),
+        retainedRecord("00000000-0000-4000-8000-000000000001", root, head, { state: "applied", output: 42 })
+      ]
+    }
+  ];
+  for (const state of duplicateStates) {
+    writeRetainedState(stateFilePath, state);
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+  }
+});
+
+test("retained state fails closed: applied_task_ids contradicts the surviving proposal states", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  const firstId = "00000000-0000-4000-8000-000000000001";
+  const secondId = "00000000-0000-4000-8000-000000000002";
+  const contradictoryStates: unknown[] = [
+    // Applied history claims a proposal the record says is only proposed.
+    {
+      version: 1,
+      applied_task_ids: [firstId],
+      proposals: [retainedRecord(firstId, root, head)]
+    },
+    // A proposal claims to be applied but is missing from applied history.
+    {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [retainedRecord(firstId, root, head, { state: "applied" })]
+    },
+    // Applied history claims a proposal stuck in the interrupted applying state.
+    {
+      version: 1,
+      applied_task_ids: [firstId, secondId],
+      proposals: [
+        retainedRecord(firstId, root, head, { state: "applied" }),
+        retainedRecord(secondId, root, head, { state: "applying" })
+      ]
+    }
+  ];
+  for (const state of contradictoryStates) {
+    writeRetainedState(stateFilePath, state);
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+  }
+});
+
+test("retained state fails closed: an applied id with no backing proposal record at all", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: ["00000000-0000-4000-8000-000000000001"],
+    proposals: []
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+});
+
+test("keeps a child proposal usable when its parent record is quarantined", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const parentId = "00000000-0000-4000-8000-000000000001";
+  const childId = "00000000-0000-4000-8000-000000000002";
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [
+      // Bad parent record: quarantined on its own merits.
+      retainedRecord(parentId, root, head, { state: "bogus" }),
+      retainedRecord(childId, root, head, { parent_task_id: parentId })
+    ]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const proposals = (controlled as unknown as { proposals: Map<string, { parentTaskId?: string }> }).proposals;
+  assert.deepEqual([...proposals.keys()], [childId]);
+  // The dangling parent link (audit lineage only) is retained and harmless.
+  assert.equal(proposals.get(childId)?.parentTaskId, parentId);
+  assert.equal(tasks.taskView(childId)?.state, "completed");
+  const refined = await controlled.refine({ patch_task_id: childId, change_request: "improve" });
+  await terminal(tasks, refined.taskId);
+  const applied = await controlled.apply({ patch_task_id: refined.taskId, confirmation: "APPLY" });
+  assert.equal(applied.applied, true);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("retained state fails closed: a surviving parent contradicts the child workspace or base", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "workspace", root, allow_write: true },
+    { id: "other", root, allow_write: true }
+  ]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const parentId = "00000000-0000-4000-8000-000000000001";
+  const childId = "00000000-0000-4000-8000-000000000002";
+  const stateFilePath = retainedStateFile();
+  const inconsistentChildren: Array<Record<string, unknown>> = [
+    // Child base differs from the surviving parent's base.
+    { parent_task_id: parentId, base_head: "1111111111111111111111111111111111111111" },
+    // Child workspace differs from the surviving parent's workspace.
+    { parent_task_id: parentId, workspace_id: "other" }
+  ];
+  for (const childOverrides of inconsistentChildren) {
+    writeRetainedState(stateFilePath, {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [
+        retainedRecord(parentId, root, head),
+        retainedRecord(childId, root, head, childOverrides)
+      ]
+    });
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await expectCode(() => controlled.load(), "INTERNAL_ERROR");
+  }
+});
+
+test("keeps a refine chain usable across restart when refining a restored child", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const refinedPatch = validPatch.replace("+after", "+refined after");
+  const first = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const source = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(first.tasks, source.taskId);
+  const refined = await first.controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "improve wording"
+  });
+  await terminal(first.tasks, refined.taskId);
+
+  const restarted = fixture(
+    root,
+    async () => ({ kind: "completed", output: refinedPatch }),
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+  // Refining the restored child, not the source: the chain stays usable.
+  const refined2 = await restarted.controlled.refine({
+    patch_task_id: refined.taskId,
+    change_request: "polish"
+  });
+  await terminal(restarted.tasks, refined2.taskId);
+
+  assert.equal(refined2.baseHead, source.baseHead);
+  const state = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; parent_task_id?: string }>;
+  };
+  assert.equal(state.proposals.find(({ task_id }) => task_id === refined2.taskId)?.parent_task_id, refined.taskId);
+  const applied = await restarted.controlled.apply({ patch_task_id: refined2.taskId, confirmation: "APPLY" });
+  assert.equal(applied.applied, true);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "refined after\n");
 });

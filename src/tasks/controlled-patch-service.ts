@@ -94,12 +94,11 @@ export class ControlledPatchService {
 
     let retainedState: RetainedState;
     try {
-      retainedState = parseRetainedState(JSON.parse(source));
-      for (const proposal of retainedState.proposals) {
-        if (this.registry.resolve(proposal.workspaceId) !== proposal.workspaceRoot) {
-          throw new CoreError("INTERNAL_ERROR");
-        }
-      }
+      // Global failures (unreadable JSON, bad envelope/version, invalid
+      // applied_task_ids, identity ambiguity, applied-history contradictions)
+      // still fail the whole load; only per-record problems are quarantined
+      // inside parseRetainedState.
+      retainedState = parseRetainedState(JSON.parse(source), this.registry);
     } catch {
       throw new CoreError("INTERNAL_ERROR");
     }
@@ -379,42 +378,68 @@ export class ControlledPatchService {
   }
 }
 
-function parseRetainedState(value: unknown): RetainedState {
+// Strictly parses the retained controlled-patch state. Global invariants always
+// fail closed with INTERNAL_ERROR; a single proposal record that cannot be
+// safely restored is quarantined instead, so one bad record cannot brick the
+// whole server. Quarantine never weakens the replay/duplicate-APPLY judgment:
+// a quarantined record is dropped from the in-memory map (it can never be
+// refined or APPLYed again), its task is never restored, and any
+// applied_task_ids entry that referenced it is dropped with it, keeping the
+// applied history exactly equal to the surviving applied proposals.
+function parseRetainedState(value: unknown, registry: RegisteredWorkspaceRegistry): RetainedState {
+  // 1. Strict envelope: an unreadable or unsupported top-level state fails the
+  //    whole load, never a per-record quarantine.
   if (!isObject(value) || value.version !== CONTROLLED_PATCH_STATE_VERSION ||
       !Array.isArray(value.applied_task_ids) || !Array.isArray(value.proposals)) {
     throw new CoreError("INTERNAL_ERROR");
   }
 
-  const retained = value.proposals.map((item): RetainedProposal => {
-    if (!isObject(item) || !isId(item.task_id) ||
-        typeof item.workspace_id !== "string" || item.workspace_id.length === 0 ||
-        typeof item.workspace_root !== "string" ||
-        (item.unborn !== undefined && typeof item.unborn !== "boolean") ||
-        !["proposed", "applying", "applied"].includes(item.state as string) ||
-        (item.parent_task_id !== undefined && !isId(item.parent_task_id)) ||
-        typeof item.output !== "string") {
-      throw new CoreError("INTERNAL_ERROR");
-    }
-    return {
-      taskId: item.task_id,
-      workspaceId: item.workspace_id,
-      workspaceRoot: item.workspace_root,
-      base: parseProposalBase(item),
-      state: item.state as Proposal["state"],
-      parentTaskId: item.parent_task_id as Id | undefined,
-      output: item.output
-    };
-  });
-
-  const byTaskId = new Map<Id, RetainedProposal>();
-  for (const proposal of retained) {
-    if (byTaskId.has(proposal.taskId) || proposal.parentTaskId === proposal.taskId) {
-      throw new CoreError("INTERNAL_ERROR");
-    }
-    byTaskId.set(proposal.taskId, proposal);
+  // 2. Strict applied_task_ids list: the list itself is a global invariant
+  //    (well-formed ids, no duplicates, bounded history).
+  if (!value.applied_task_ids.every(isId)) throw new CoreError("INTERNAL_ERROR");
+  const appliedTaskIds = value.applied_task_ids as Id[];
+  if (appliedTaskIds.length > MAX_APPLIED_PROPOSAL_HISTORY ||
+      new Set(appliedTaskIds).size !== appliedTaskIds.length) {
+    throw new CoreError("INTERNAL_ERROR");
   }
-  for (const proposal of retained) {
+
+  // 3. Record-level parse with per-record quarantine.
+  const proposals: RetainedProposal[] = [];
+  const quarantinedTaskIds = new Set<Id>();
+  const taskIdOccurrences = new Map<Id, number>();
+  for (const item of value.proposals) {
+    // A duplicated task id makes proposal identity ambiguous even when one of
+    // the duplicates is otherwise broken (one copy could say "applied" while
+    // the other says "proposed"), so it always fails closed.
+    if (isObject(item) && isId(item.task_id)) {
+      const occurrences = (taskIdOccurrences.get(item.task_id) ?? 0) + 1;
+      taskIdOccurrences.set(item.task_id, occurrences);
+      if (occurrences > 1) throw new CoreError("INTERNAL_ERROR");
+    }
+    const proposal = parseRetainedProposal(item);
+    if (proposal === undefined) {
+      if (isObject(item) && isId(item.task_id)) quarantinedTaskIds.add(item.task_id);
+      continue;
+    }
+    // A proposal whose workspace is no longer registered (or whose root no
+    // longer matches the registry) can be neither safely restored nor APPLYed:
+    // quarantine it instead of failing the whole load.
+    if (!registryMatches(registry, proposal.workspaceId, proposal.workspaceRoot)) {
+      quarantinedTaskIds.add(proposal.taskId);
+      continue;
+    }
+    proposals.push(proposal);
+  }
+
+  // 4. parent/refine relationship invariants over surviving proposals. The
+  //    parent link is audit lineage only: a dangling parent (quarantined or
+  //    never persisted) is allowed, but a surviving parent whose workspace or
+  //    base contradicts the child fails closed.
+  const byTaskId = new Map<Id, RetainedProposal>();
+  for (const proposal of proposals) byTaskId.set(proposal.taskId, proposal);
+  for (const proposal of proposals) {
     if (proposal.parentTaskId === undefined) continue;
+    if (proposal.parentTaskId === proposal.taskId) throw new CoreError("INTERNAL_ERROR");
     const parent = byTaskId.get(proposal.parentTaskId);
     if (parent !== undefined && (parent.workspaceId !== proposal.workspaceId ||
         parent.workspaceRoot !== proposal.workspaceRoot ||
@@ -422,17 +447,64 @@ function parseRetainedState(value: unknown): RetainedState {
       throw new CoreError("INTERNAL_ERROR");
     }
   }
-  if (!value.applied_task_ids.every(isId)) throw new CoreError("INTERNAL_ERROR");
-  const appliedTaskIds = value.applied_task_ids as Id[];
-  const appliedTaskIdSet = new Set(appliedTaskIds);
-  const appliedProposals = retained.filter(({ state }) => state === "applied");
-  if (appliedTaskIds.length > MAX_APPLIED_PROPOSAL_HISTORY ||
-      appliedTaskIdSet.size !== appliedTaskIds.length ||
-      appliedProposals.length !== appliedTaskIds.length ||
-      appliedProposals.some(({ taskId }) => !appliedTaskIdSet.has(taskId))) {
+
+  // 5. Applied-history cross-invariant over survivors: applied_task_ids must
+  //    equal exactly the surviving applied proposals. A quarantined record
+  //    takes its own applied_task_ids entry with it, so dropping a bad applied
+  //    record never leaves a dangling applied id behind; an applied id with no
+  //    proposal record at all still fails closed.
+  const survivingAppliedTaskIds = appliedTaskIds.filter((taskId) => !quarantinedTaskIds.has(taskId));
+  const survivingAppliedTaskIdSet = new Set(survivingAppliedTaskIds);
+  const appliedProposals = proposals.filter(({ state }) => state === "applied");
+  if (appliedProposals.length !== survivingAppliedTaskIds.length ||
+      appliedProposals.some(({ taskId }) => !survivingAppliedTaskIdSet.has(taskId))) {
     throw new CoreError("INTERNAL_ERROR");
   }
-  return { proposals: retained, appliedTaskIds };
+  return { proposals, appliedTaskIds: survivingAppliedTaskIds };
+}
+
+// Parses a single retained proposal record. Returns undefined for a record that
+// cannot be safely restored because its own fields are malformed; the caller
+// quarantines such records. Any failure here is strictly record-local: no
+// global invariant (identity, applied history, replay safety) is affected by
+// dropping the record.
+function parseRetainedProposal(item: unknown): RetainedProposal | undefined {
+  if (!isObject(item) || !isId(item.task_id) ||
+      typeof item.workspace_id !== "string" || item.workspace_id.length === 0 ||
+      typeof item.workspace_root !== "string" ||
+      (item.unborn !== undefined && typeof item.unborn !== "boolean") ||
+      !["proposed", "applying", "applied"].includes(item.state as string) ||
+      (item.parent_task_id !== undefined && !isId(item.parent_task_id)) ||
+      typeof item.output !== "string") {
+    return undefined;
+  }
+  let base: ProposalBase;
+  try {
+    base = parseProposalBase(item);
+  } catch {
+    return undefined;
+  }
+  return {
+    taskId: item.task_id,
+    workspaceId: item.workspace_id,
+    workspaceRoot: item.workspace_root,
+    base,
+    state: item.state as Proposal["state"],
+    parentTaskId: item.parent_task_id as Id | undefined,
+    output: item.output
+  };
+}
+
+function registryMatches(
+  registry: RegisteredWorkspaceRegistry,
+  workspaceId: string,
+  workspaceRoot: string
+): boolean {
+  try {
+    return registry.resolve(workspaceId) === workspaceRoot;
+  } catch {
+    return false;
+  }
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
