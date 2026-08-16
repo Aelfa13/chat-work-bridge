@@ -2,34 +2,34 @@
 
 **Connect Chat directly to local Codex: no more shuttling prompts and results—Chat dispatches, supervises, and accepts Codex work.**
 
-[![Stable v1.1.0](https://img.shields.io/badge/stable-v1.1.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.1.0)
+[![Stable v1.2.0](https://img.shields.io/badge/stable-v1.2.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.1.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.1.0) · V1 Stable Release · Local · Continuously maintainer-tested on macOS.** This is the stable V1 release (`v1.1.0`), but it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.1.0` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+[简体中文](README.md) · **[v1.2.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.0) · V1 Stable Release · Local · Continuously maintainer-tested on macOS.** This is the stable V1 release (`v1.2.0`), but it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.2.0` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
 
 ## Before / now
 
 **Before:** you discussed requirements in Chat, manually copied a prompt into Codex, then carried Codex's result back to Chat for the next round—repeating the shuttle each time.
 
-**Now:** Chat hands the task directly to local Codex and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. The core V1 change over the older one-shot task/result flow is an explicit interactive supervision flow: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`. For controlled changes, you still review the complete diff first and retain the decision to write.
+**Now:** Chat hands the task directly to local Codex or DSH (each `run_task` accepts an optional `executor: "codex" | "dsh"`, defaulting to `codex`) and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. The core V1 change over the older one-shot task/result flow is an explicit interactive supervision flow: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`. For controlled changes, you still review the complete diff first and retain the decision to write.
 
 ```mermaid
 flowchart LR
     A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
-    B --> C[Local Codex: read-only inspection or patch proposal]
+    B --> C[Local Codex / DSH: read-only inspection or patch proposal]
     C --> D[Result returns to Chat]
     D --> E[Human reviews]
     E -->|exact APPLY| F[Revalidate and write under controls]
 ```
 
-**State boundary:** Bridge owns control state, not session truth. The native Codex thread/session remains the source of execution history; Bridge keeps only the temporary supervision/control state needed for continue, steer, interrupt, and accept. This control state may be lost on Bridge restart by design; V1 does not persist or mirror Codex session history in SQLite, a database, or a transcript mirror.
+**State boundary:** Bridge owns control state, not session truth. The native Codex thread/session remains the source of execution history; Bridge keeps only the temporary supervision/control state needed for continue, steer, interrupt, and accept. DSH's headless interface currently has no machine-resumable session seam, so a DSH `continue` starts a new execution and `task_result` never fabricates a thread id. Task supervision state (task/thread/evidence/review) may be lost on Bridge restart by design; V1 does not persist or mirror any executor's session history in SQLite, a database, or a transcript mirror.
 
 Everything above is a local process connection over MCP/STDIO. There is no HTTP endpoint or cloud service in Engineering Bridge.
 
 ## What is it?
 
-Engineering Bridge is a small “engineering bridge” that runs on your computer. You describe what you want to understand or change in a compatible chat client; it hands the task to local Codex CLI, lets Codex inspect a pre-registered project, and brings the analysis or patch back into the conversation.
+Engineering Bridge is a small “engineering bridge” that runs on your computer. You describe what you want to understand or change in a compatible chat client; it hands the task to local Codex or DSH (Codex by default), lets the executor inspect a pre-registered project, and brings the analysis or patch back into the conversation.
 
 It is for people who want conversational help understanding and reviewing code, as well as developers who want explicit control over writes. You do not need to read a protocol specification first, but you do need to configure Node.js, Git, Codex CLI, and an MCP client once. A browser-only chat cannot use it directly.
 
@@ -41,7 +41,7 @@ There are four roles:
 
 - **Chat client:** understands your request, calls tools, and displays results in the conversation; it must be able to launch a local STDIO MCP server.
 - **Engineering Bridge:** maps a `workspace_id` to a project path in trusted local configuration, starts and tracks tasks, and validates controlled patches.
-- **Local Codex:** currently runs through `codex app-server --stdio` to inspect a registered workspace read-only or prepare a patch.
+- **Local executor:** Codex runs through `codex app-server --stdio`; DSH runs through the official headless interface. Both perform read-only inspection or prepare a patch.
 - **MCP-STDIO:** the local protocol and process connection between the client and Bridge; there is no HTTP endpoint or cloud service.
 
 ## What can it do today?
@@ -60,7 +60,7 @@ The controlled-write rule is simple: **show the diff first, write only after exa
 - **Planning and execution have distinct jobs.** Chat shapes the goal; local Codex inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
 - **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
 - **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
-- **Codex CLI is the current implementation.** Other CLI agents are a future, adapter-by-adapter direction—not current support. This release supports and has been tested only with Codex CLI.
+- **Two executors are implemented: Codex and DSH.** `run_task` accepts an optional `executor: "codex" | "dsh"` (default `codex`). Other CLI agents remain a future, adapter-by-adapter direction—not current support.
 
 ## A real project example
 
@@ -70,19 +70,20 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 
 | Available today | Does not do today | Roadmap—not current support |
 | --- | --- | --- |
-| Read-only analysis, code location, and review in a pre-registered workspace | Cannot create or register a workspace automatically | Simplify workspace creation and registration |
-| Generate a complete Git patch before any write | Does not automatically test, stage, commit, push, or create a Release | Adapt other CLI agents one at a time |
-| Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation | No HTTP, UI, account system, caller authentication, or remote transport | Carefully explore multi-agent orchestration |
-| Modify tracked regular text files; add ordinary 100644 text files | No automatic timeout; no persistence across restarts | These items are directions, not supported features |
-| Six local MCP tools over STDIO | Not OS-level read isolation | — |
+| Read-only analysis, code location, and review in a pre-registered workspace; `run_task` selects Codex or DSH (Codex by default) | Does not automatically test, stage, commit, push, or create a Release | Workspace GUI/manager |
+| Bind or create and register a workspace inside `project_root` with exact `BIND`/`CREATE` | Not OS-level read isolation | Adapt other CLI agents one at a time |
+| Generate a complete Git patch before any write; controlled writes for managed workspaces after exact `AUTHORIZE` | No HTTP, UI, account system, caller authentication, or remote transport | DSH native headless session resume |
+| Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation; unborn repositories support added 100644 text files | Does not persist task/thread/evidence supervision history; no automatic timeout | Persistent task/audit history |
+| Controlled-patch proposals/applied history and the managed workspace catalog survive restarts | — | Carefully explore multi-agent orchestration |
+| Nine local MCP tools over STDIO | — | — |
 
 ## Quick start
 
 ### 1. Prepare
 
-You need Node.js 22+, Git, an installed and authenticated `codex` CLI available on `PATH`, a local project, an MCP client that can launch a local STDIO server, and basic terminal familiarity.
+You need Node.js 22+, Git, an installed and authenticated `codex` and/or `dsh` CLI available on `PATH` (depending on the `executor` you use), a local project, an MCP client that can launch a local STDIO server, and basic terminal familiarity.
 
-For controlled writes, the project must also be a clean Git top-level with an initial commit/HEAD, and its registration must explicitly enable `allow_write`.
+For controlled writes, the project must also be a clean Git top-level (with an existing HEAD, or with unborn-repository support for added-file proposals), and controlled-write permission must be ready: manual workspaces set `allow_write: true` in their registration, managed workspaces authorize through `authorize_workspace_write` with exact `AUTHORIZE`.
 
 ### 2. Clone, install, and build
 
@@ -93,22 +94,29 @@ npm install
 npm run build
 ```
 
-The stable V1 release (`v1.1.0`) has no one-click installer.
+The stable V1 release (`v1.2.0`) has no one-click installer.
 
 ### 3. Register a workspace
 
-The stable V1 release still requires a pre-registered workspace. Create `workspaces.json` with an absolute, normalized project path:
+Two ways:
+
+- **Manual registration (authoritative):** put the project's absolute, normalized path in `workspaces.json`. The file is trusted local configuration; MCP callers can select an ID but cannot create, register, or replace paths.
+- **Managed registration (onboarding):** configure `project_root` entries (the trusted approved-root boundary) in `workspaces.json`, then either bind an existing directory with `bind_project` (exact `BIND`) or create and git-initialize a new directory with `create_project` (exact `CREATE`). Managed workspaces are read-only by default and persist to `<config>.managed-workspaces.json`.
 
 ```json
 [
   {
     "id": "my-project",
     "root": "/absolute/path/to/my-project"
+  },
+  {
+    "kind": "project_root",
+    "root": "/absolute/path/to/projects"
   }
 ]
 ```
 
-This file is trusted local configuration. MCP callers can select an ID but cannot create, register, or replace paths; V1 does not provide automatic project binding, discovery, or onboarding, so calls still require a registered `workspace_id`. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
+Calls still require a registered `workspace_id`. On macOS, aliases such as `/tmp` and `/private/tmp` are compared by their real filesystem path during controlled-write Git-root checks.
 
 ### 4. Configure a STDIO MCP client
 
@@ -129,11 +137,14 @@ Client schemas and configuration locations differ; translate these generic field
 
 Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
 
-Reconnect the integration and confirm these six current V1 tools are visible:
+Reconnect the integration and confirm these nine current V1 tools are visible:
 
 - `run_task`
 - `task_result`
 - `control_task`
+- `bind_project`
+- `create_project`
+- `authorize_workspace_write`
 - `generate_controlled_patch`
 - `refine_controlled_patch`
 - `apply_controlled_patch`
@@ -142,7 +153,7 @@ Reconnect the integration and confirm these six current V1 tools are visible:
 
 > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
 
-Ordinary `run_task` is always read-only and returns a task ID on success. The V1 interactive supervision order is: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`; this is the core V1 change over the older one-shot task/result flow. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `control_task` accepts only interactive `run_task` task IDs: `continue` preserves native Codex thread continuity, `interrupt` applies only while an interactive task is running and ends it as failed, and only finalization exposes final `output` or `error` through `task_result`. Verify the workspace yourself:
+Ordinary `run_task` is always read-only (with an optional `executor: "codex" | "dsh"`, default `codex`) and returns a task ID on success. The V1 interactive supervision order is: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`; this is the core V1 change over the older one-shot task/result flow. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `task_result` also reports the fixed `executor`; Codex tasks return the real native `thread_id` once one exists, while DSH tasks never get a fabricated `thread_id` because the headless interface has no machine-resumable session seam (a DSH `continue` is a new execution). `control_task` accepts only interactive `run_task` task IDs: `continue` preserves native Codex thread continuity, `interrupt` applies only while an interactive task is running and ends it as failed (if the executor genuinely produced partial output, `task_result` returns it as `partial_output` while the state stays failed), and only finalization exposes final `output` or `error` through `task_result`. Verify the workspace yourself:
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -152,7 +163,7 @@ For an initially clean Git project, no output means the worktree remains unchang
 
 ### 6. Make the first controlled write
 
-Enable writing only for the intended workspace:
+Controlled-write permission is set per workspace source: manual workspaces set `allow_write: true` in `workspaces.json`; managed workspaces call `authorize_workspace_write` with exact `AUTHORIZE` (AUTHORIZE affects only managed entries and never modifies a manual entry):
 
 ```json
 [
@@ -164,10 +175,10 @@ Enable writing only for the intended workspace:
 ]
 ```
 
-1. Confirm the configured root is the Git top-level, an existing HEAD is present, and the tracked worktree and index are clean.
-2. Call `generate_controlled_patch` with the workspace ID and a narrow request. This is a separate controlled-patch flow, not the interactive `run_task` supervision flow.
+1. Confirm the configured root is the Git top-level and the tracked worktree and index are clean (with an existing HEAD, or unborn-repository support for added-file proposals).
+2. Call `generate_controlled_patch` with the workspace ID and a narrow request. This is a separate controlled-patch flow, not the interactive `run_task` supervision flow; **generation/refinement is a read-only proposal and works in any registered workspace without write authorization**.
 3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. If it needs correction, call `refine_controlled_patch` with the completed patch task ID and a refinement request; it retains the source and returns a new complete proposal against the same `base_head`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
-4. Outside task state, follow `generate_controlled_patch` → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
+4. Outside task state, follow `generate_controlled_patch` → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. For managed workspaces, complete `AUTHORIZE` first if needed. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
 5. Inspect the result:
 
    ```sh
@@ -178,7 +189,7 @@ Enable writing only for the intended workspace:
 
 6. Run the project's tests and decide whether to stage, commit, push, and release. Bridge performs none of them.
 
-Untracked files elsewhere do not by themselves violate the clean tracked-state requirement, but any proposed new-file target must be absent from HEAD, the index, and the worktree.
+Untracked files elsewhere do not by themselves violate the clean tracked-state requirement, but any proposed new-file target must be absent from HEAD, the index, and the worktree. Unborn repositories (for example, a fresh `create_project` workspace) support proposals that add ordinary 100644 text files; Bridge never runs `git add` or commits automatically.
 
 For protocol diagnostics, you may start Bridge manually:
 
@@ -192,14 +203,15 @@ The process waits for MCP messages on standard input. It is not an interactive s
 
 ## Safety boundary
 
-- Workspaces are read-only by default; controlled writing must be enabled per workspace with `allow_write: true`.
-- A proposal exposes the complete diff and its base HEAD. Only exact `APPLY` proceeds, after Bridge rechecks the Git top-level, HEAD, clean tracked worktree and index, and patch validity.
-- Accepted patches may modify existing tracked regular text files or add absent ordinary text files with mode 100644.
+- Workspaces are read-only by default; controlled writing is enabled per source: manual workspaces set `allow_write: true`, managed workspaces authorize through `authorize_workspace_write` with exact `AUTHORIZE`.
+- A proposal exposes the complete diff and its base HEAD. Only exact `APPLY` proceeds, after Bridge rechecks the Git top-level, HEAD, clean tracked worktree and index, and patch validity. Generation/refinement needs no write authorization; write permission is required only at `APPLY`.
+- Accepted patches may modify existing tracked regular text files or add absent ordinary text files with mode 100644 (unborn repositories support additions only).
 - Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
 - Bridge never automatically tests, stages, commits, pushes, or creates a Release.
-- The Codex backend is `codex app-server --stdio`, with no shell, approval `never`, and network disabled. Ordinary/supervisor tasks and proposal generation remain read-only; only exact reviewed `APPLY` is a filesystem write path.
-- State is process-local, with no restart recovery; V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`.
-- Projects are not automatically bound, discovered, or registered; workspaces must remain pre-registered in `workspaces.json`, and calls still require `workspace_id`.
+- The Codex backend is `codex app-server --stdio`, with no shell, approval `never`, and network disabled; DSH runs through the official headless interface with a per-process `DSH_PERMISSION_MODE=read-only` pin, an explicit environment allowlist (including `DEEPSEEK_API_KEY` and `DSH_TOOLS_MODE`), and proxy variables excluded. Ordinary/supervisor tasks and proposal generation remain read-only; only exact reviewed `APPLY` is a filesystem write path.
+- Task supervision state (task/thread/evidence/review) is process-local; controlled-patch proposals/applied history and the managed workspace catalog survive restarts (two local state files, mode 0600). V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`; genuine partial output from an interrupt is returned as `partial_output`, while ordinary failures never re-expose stderr or partial stdout.
+- Workspaces are registered in two ways: manually in `workspaces.json` (authoritative) or through managed onboarding inside `project_root` with exact `BIND`/`CREATE`; calls still require `workspace_id`.
+- Codex evidence truncated/evicted by its existing bounds carries explicit markers (`[truncated]`, changes-omitted counts, evidence-drop)—they mean the diagnostic information is incomplete, not that it is a complete transcript.
 - Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
 - A human must review the complete proposal; a requested filename is not a code-enforced semantic allowlist.
 
@@ -207,12 +219,12 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 
 ## Troubleshooting
 
-- **The five tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
-- **The client cannot find `node` or `codex`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing both executables.
+- **The nine tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
+- **The client cannot find `node`, `codex`, or `dsh`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing these executables.
 - **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
-- **Controlled write refused:** check `allow_write`, the Git top-level, existing HEAD, and clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
+- **Controlled write refused:** check the controlled-write permission (manual `allow_write` or managed `AUTHORIZE`), the Git top-level, and a clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
 - **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
-- **A task never finishes:** V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`; other tasks can continue to be polled, and restarting Bridge discards the temporary control state and other in-memory state by design.
+- **A task never finishes:** V1 has no automatic timeout. A running interactive task can be explicitly interrupted through `control_task(action: "interrupt")`; other tasks can continue to be polled. Restarting Bridge discards task supervision state by design; controlled-patch proposals and the managed workspace catalog are retained.
 
 ## Project story
 
