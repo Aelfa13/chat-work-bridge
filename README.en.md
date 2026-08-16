@@ -2,11 +2,11 @@
 
 **Connect Chat directly to local Codex: no more shuttling prompts and results—Chat dispatches, supervises, and accepts Codex work.**
 
-[![Stable v1.2.0](https://img.shields.io/badge/stable-v1.2.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.0)
+[![Stable v1.2.1](https://img.shields.io/badge/stable-v1.2.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.2.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.0) · V1 Stable Release · Local · Continuously maintainer-tested on macOS.** This is the stable V1 release (`v1.2.0`), but it does not indicate npm publication. Early/community Windows users have completed the read-only, patch-generation, `APPLY`, and real-write flow; `v1.2.0` still needs external Windows and multi-client validation, and this is not maintainer-certified Windows compatibility.
+[简体中文](README.md) · **[v1.2.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1) · V1 Stable Release · Local · Continuously maintainer-tested on macOS.** This is the stable V1 release (`v1.2.1`), but it does not indicate npm publication. The v1.2.1 Codex and DSH Windows npm CLI launch path has been verified on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
 
 ## Before / now
 
@@ -94,7 +94,7 @@ npm install
 npm run build
 ```
 
-The stable V1 release (`v1.2.0`) has no one-click installer.
+The stable V1 release (`v1.2.1`) has no one-click installer.
 
 ### 3. Register a workspace
 

@@ -1,5 +1,50 @@
 # Release notes
 
+## v1.2.1
+
+v1.2.1 is a Windows launch-compatibility patch for both executors. The DSH executor itself was added in v1.2.0; v1.2.1 does not add an executor, it fixes how npm-installed Codex and DSH CLIs are resolved and launched on Windows.
+
+### Windows CLI compatibility
+
+- Fix Windows command resolution for npm-installed Codex and DSH CLIs.
+- Standard Windows npm installs expose:
+
+  ```
+  codex.cmd
+  dsh.cmd
+  ```
+
+- Bridge now resolves those npm shims to their official Node entrypoints:
+
+  ```
+  @openai/codex/bin/codex.js
+  @deepseek-ai/dsh/lib/bin.js
+  ```
+
+- The launch path uses `process.execPath` + the JS entrypoint.
+- A real `codex.exe` / `dsh.exe` remains directly supported and preferred.
+
+### Safety
+
+- No `cmd.exe` / `ComSpec` runtime path.
+- No `shell: true`.
+- The Codex instruction still travels through JSON-RPC stdin.
+- The DSH instruction remains a single argv argument.
+- Unresolved shim targets fail closed through the existing shell-free fallback chain.
+
+### Verification
+
+Validated on a real GitHub Actions `windows-latest` runner with Node 22 and actual npm-installed `@openai/codex` and `@deepseek-ai/dsh` packages.
+
+Windows smoke confirmed:
+
+- real `codex.cmd` and `dsh.cmd` layouts
+- resolver discovery
+- both official Node launchers start successfully
+- focused executor tests pass
+
+Windows compatibility improved and this specific npm CLI path is now verified; full multi-client / all-Windows-environment certification is not claimed.
+
 ## v1.2.0
 
 v1.2.0 keeps the Codex behavior of v1.1.0 (including its default selection) and adds a second executor, managed workspace onboarding, restart persistence for controlled patches, and more honest task reporting.
