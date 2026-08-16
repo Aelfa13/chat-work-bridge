@@ -23,9 +23,31 @@ const ENVIRONMENT_ALLOWLIST = [
   "LOGNAME"
 ] as const;
 const MAX_OUTPUT_BYTES = 1_048_576;
+const TRUNCATION_MARKER = "[output truncated]";
+
+interface ActiveExecution {
+  readonly child: ChildProcessWithoutNullStreams;
+  interrupted: boolean;
+}
 
 function failure(code: "DSH_UNAVAILABLE" | "DSH_PROTOCOL_ERROR" | "DSH_EXECUTION_FAILED"): ExecutorResult {
   return { kind: "failed", error: serializeError(new CoreError(code)) };
+}
+
+// Strictly decodes a truncated stdout prefix. The truncation boundary may cut a
+// multi-byte UTF-8 code point, so up to 3 incomplete trailing bytes are dropped
+// to find the longest strictly valid prefix. Genuinely invalid UTF-8 before the
+// boundary still fails every attempt and yields undefined.
+function decodeTruncatedPrefix(chunks: readonly Buffer[]): string | undefined {
+  const bytes = Buffer.concat(chunks);
+  for (let drop = 0; drop <= 3; drop += 1) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, bytes.length - drop));
+    } catch {
+      // Try the next shorter prefix.
+    }
+  }
+  return undefined;
 }
 
 function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
@@ -74,6 +96,8 @@ function invocation(host: Readonly<NodeJS.ProcessEnv>): { executable: string; ar
 }
 
 export class DshExecutor implements Executor {
+  private active: ActiveExecution | undefined;
+
   constructor(
     private readonly workspaceRoot: string,
     private readonly startProcess: DshProcessStarter = spawn,
@@ -97,10 +121,14 @@ export class DshExecutor implements Executor {
     return new Promise<ExecutorResult>((resolveResult) => {
       const chunks: Buffer[] = [];
       let bytes = 0;
+      let truncated = false;
       let settled = false;
+      const active: ActiveExecution = { child, interrupted: false };
+      this.active = active;
       const finish = (result: ExecutorResult): void => {
         if (settled) return;
         settled = true;
+        if (this.active === active) this.active = undefined;
         resolveResult(result);
       };
       const stop = (result: ExecutorResult): void => {
@@ -114,15 +142,28 @@ export class DshExecutor implements Executor {
       child.stderr.on("error", () => stop(failure("DSH_EXECUTION_FAILED")));
       child.stderr.resume();
       child.stdout.on("data", (chunk: Buffer) => {
-        bytes += chunk.length;
-        if (bytes > MAX_OUTPUT_BYTES) {
-          stop(failure("DSH_PROTOCOL_ERROR"));
+        if (truncated) return;
+        const remaining = MAX_OUTPUT_BYTES - bytes;
+        if (chunk.length > remaining) {
+          // Only the first MAX_OUTPUT_BYTES are retained. Keep draining stdout
+          // so DSH can run to completion and exit on its own; never kill it
+          // for producing too much output.
+          truncated = true;
+          if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
+          bytes = MAX_OUTPUT_BYTES;
           return;
         }
+        bytes += chunk.length;
         chunks.push(chunk);
       });
       child.on("close", (code) => {
         if (settled) return;
+        if (active.interrupted) {
+          // An interrupt was actually triggered with SIGTERM: report the cached
+          // partial stdout regardless of the exit code.
+          finish({ kind: "interrupted", output: new TextDecoder("utf-8").decode(Buffer.concat(chunks)) });
+          return;
+        }
         if (code !== 0) {
           finish(failure("DSH_EXECUTION_FAILED"));
           return;
@@ -131,16 +172,31 @@ export class DshExecutor implements Executor {
           finish(failure("DSH_PROTOCOL_ERROR"));
           return;
         }
+        if (truncated) {
+          const prefix = decodeTruncatedPrefix(chunks);
+          finish(prefix === undefined
+            ? failure("DSH_PROTOCOL_ERROR")
+            : { kind: "completed", output: `${prefix}\n${TRUNCATION_MARKER}` });
+          return;
+        }
         try {
           const output = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
           finish(output.endsWith("\n")
             ? { kind: "completed", output: output.slice(0, -1) }
-            : failure("DSH_PROTOCOL_ERROR"));
+            : { kind: "completed", output });
         } catch {
           finish(failure("DSH_PROTOCOL_ERROR"));
         }
       });
       child.stdin.end();
     });
+  }
+
+  async interrupt(): Promise<void> {
+    const active = this.active;
+    if (active === undefined) throw new CoreError("INVALID_STATE_TRANSITION");
+    if (active.interrupted) return;
+    if (!active.child.kill("SIGTERM")) throw new CoreError("INVALID_STATE_TRANSITION");
+    active.interrupted = true;
   }
 }

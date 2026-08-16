@@ -52,6 +52,10 @@ const MAX_TERMINAL_TASK_HISTORY = 100;
 
 export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void | Promise<void>;
 
+function interruptedError(executor: ExecutorName): SerializedError {
+  return serializeError(new CoreError(executor === "dsh" ? "DSH_EXECUTION_FAILED" : "CODEX_EXECUTION_FAILED"));
+}
+
 export class RegisteredWorkspaceTaskService {
   private readonly tasks = new Map<Id, TaskRecord>();
   private readonly pinnedTaskIds = new Set<Id>();
@@ -182,7 +186,7 @@ export class RegisteredWorkspaceTaskService {
       else if (result.kind === "interrupted") {
         record.output = undefined;
         record.state = "failed";
-        record.error = serializeError(new CoreError("CODEX_EXECUTION_FAILED"));
+        record.error = interruptedError(record.request.executor);
       } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
@@ -214,7 +218,7 @@ export class RegisteredWorkspaceTaskService {
         }
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
-          : { id: taskId, state: "failed", error: serializeError(new CoreError("CODEX_EXECUTION_FAILED")) };
+          : { id: taskId, state: "failed", error: interruptedError(request.executor) };
       await this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {

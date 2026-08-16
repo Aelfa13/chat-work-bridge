@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { SerializedError } from "../../../src/core/errors.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "../../../src/executors/executor.js";
+import { DshExecutor } from "../../../src/executors/dsh-executor.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
 import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
 
@@ -172,6 +176,29 @@ test("records an interrupted legacy task as an execution failure", async () => {
   });
 });
 
+test("records an interrupted DSH legacy task as DSH_EXECUTION_FAILED", async () => {
+  let executorName: "codex" | "dsh" | undefined;
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), (name) => {
+    executorName = name;
+    return executor;
+  });
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  await waitForTerminal(service, taskId);
+
+  assert.equal(executorName, "dsh");
+  assert.deepEqual(service.status(taskId), { taskId, state: "failed" });
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
+    }
+  });
+});
+
 test("records an interrupted interactive task as an execution failure without review output", async () => {
   const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
@@ -189,6 +216,88 @@ test("records an interrupted interactive task as an execution failure without re
     error: {
       code: "CODEX_EXECUTION_FAILED",
       message: "Codex execution failed."
+    }
+  });
+});
+
+test("records an interrupted DSH interactive task as DSH_EXECUTION_FAILED", async () => {
+  let executorName: "codex" | "dsh" | undefined;
+  const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), (name) => {
+    executorName = name;
+    return executor;
+  });
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(executorName, "dsh");
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    ready: true,
+    evidence: [],
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
+    }
+  });
+});
+
+test("control_task interrupt reaches the DSH executor with SIGTERM", async () => {
+  const signals: string[] = [];
+  let emitClose: ((code: number | null) => void) | undefined;
+  const service = new RegisteredWorkspaceTaskService(registry(), (executor, workspaceRoot) => {
+    assert.equal(executor, "dsh");
+    assert.equal(workspaceRoot, ROOT);
+    return new DshExecutor(ROOT, () => {
+      const child = new EventEmitter();
+      const stdin = new PassThrough();
+      const stdout = new PassThrough();
+      const stderr = new PassThrough();
+      Object.assign(child, {
+        stdin,
+        stdout,
+        stderr,
+        killed: false,
+        kill(signal?: string) {
+          this.killed = true;
+          signals.push(signal ?? "SIGTERM");
+          return true;
+        }
+      });
+      emitClose = (code) => {
+        stdout.end();
+        stderr.end();
+        child.emit("close", code, null);
+      };
+      return child as unknown as ChildProcessWithoutNullStreams;
+    });
+  });
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (service.taskView(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const view = await service.controlTask(taskId, "interrupt");
+  assert.equal(view.state, "running");
+  assert.deepEqual(signals, ["SIGTERM"]);
+
+  emitClose?.(0);
+  while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    ready: true,
+    evidence: [],
+    error: {
+      code: "DSH_EXECUTION_FAILED",
+      message: "DSH execution failed."
     }
   });
 });
