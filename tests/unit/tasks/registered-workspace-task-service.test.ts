@@ -5,6 +5,7 @@ import test from "node:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { SerializedError } from "../../../src/core/errors.js";
+import type { Id } from "../../../src/core/ids.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "../../../src/executors/executor.js";
 import { DshExecutor } from "../../../src/executors/dsh-executor.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
@@ -734,4 +735,29 @@ test("retains only the newest 100 terminal records without evicting live task st
   assert.equal(service.status(queuedTaskId)?.state, "queued");
   assert.equal(service.taskView(runningTaskId)?.state, "running");
   assert.equal(service.taskView(reviewTaskId)?.state, "waiting_for_supervisor_review");
+});
+
+test("restoreControlledPatchTask honors an explicit dsh executor and defaults legacy restores to codex", async () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    throw new Error("restored tasks must not execute");
+  });
+  const dshId = "00000000-0000-4000-8000-000000000001" as Id;
+  const codexId = "00000000-0000-4000-8000-000000000002" as Id;
+  service.restoreControlledPatchTask(dshId, "dsh output", true, "dsh");
+  service.restoreControlledPatchTask(codexId, "codex output", false);
+
+  assert.deepEqual(service.taskView(dshId), {
+    taskId: dshId,
+    state: "completed",
+    executor: "dsh",
+    ready: true,
+    output: "dsh output"
+  });
+  assert.deepEqual(service.taskView(codexId), {
+    taskId: codexId,
+    state: "completed",
+    executor: "codex",
+    ready: true,
+    output: "codex output"
+  });
 });

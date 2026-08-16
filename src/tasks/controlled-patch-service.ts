@@ -7,7 +7,7 @@ import { CoreError } from "../core/errors.js";
 import { isId } from "../core/ids.js";
 import type { Id } from "../core/ids.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
-import { RegisteredWorkspaceTaskService } from "./registered-workspace-task-service.js";
+import { RegisteredWorkspaceTaskService, type ExecutorName } from "./registered-workspace-task-service.js";
 
 export type GitStarter = (
   executable: string,
@@ -29,6 +29,7 @@ type Proposal = {
   base: ProposalBase;
   state: "proposed" | "applying" | "applied";
   parentTaskId: Id | undefined;
+  executor: ExecutorName;
   output: string | undefined;
 };
 
@@ -106,21 +107,23 @@ export class ControlledPatchService {
     for (const { taskId, output, ...proposal } of retainedState.proposals) {
       const restoredState = proposal.state === "applying" ? "proposed" : proposal.state;
       this.proposals.set(taskId, { ...proposal, state: restoredState, output });
-      this.tasks.restoreControlledPatchTask(taskId, output, restoredState !== "applied");
+      this.tasks.restoreControlledPatchTask(taskId, output, restoredState !== "applied", proposal.executor);
     }
     this.appliedProposalTaskIds = retainedState.appliedTaskIds;
   }
 
-  async generate(request: { workspace_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string | null }> {
+  async generate(request: { workspace_id: string; change_request: string; executor?: ExecutorName }): Promise<{ taskId: Id; baseHead: string | null }> {
     // Generating a proposal is read-only analysis: any registered workspace
     // may propose; only APPLY requires controlled-write authorization.
     const workspaceRoot = this.registry.resolve(request.workspace_id);
     const base = await this.verifyWorkspace(workspaceRoot);
     return this.startProposal(request.workspace_id, workspaceRoot, base,
-      PATCH_INSTRUCTION(request.change_request, base));
+      PATCH_INSTRUCTION(request.change_request, base),
+      undefined,
+      request.executor);
   }
 
-  async refine(request: { patch_task_id: string; change_request: string }): Promise<{ taskId: Id; baseHead: string | null }> {
+  async refine(request: { patch_task_id: string; change_request: string; executor?: ExecutorName }): Promise<{ taskId: Id; baseHead: string | null }> {
     const proposal = this.proposals.get(request.patch_task_id as Id);
     const sourceResult = this.tasks.result(request.patch_task_id);
     if (proposal === undefined || sourceResult === undefined || sourceResult.state !== "completed") {
@@ -131,7 +134,8 @@ export class ControlledPatchService {
     if (!sameBase(currentBase, proposal.base)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     return this.startProposal(proposal.workspaceId, proposal.workspaceRoot, proposal.base,
       REFINEMENT_INSTRUCTION(proposal.base, sourceResult.output, request.change_request),
-      request.patch_task_id as Id);
+      request.patch_task_id as Id,
+      request.executor);
   }
 
   async apply(request: { patch_task_id: string; confirmation: string }): Promise<{
@@ -200,11 +204,13 @@ export class ControlledPatchService {
     workspaceRoot: string,
     base: ProposalBase,
     instruction: string,
-    parentTaskId?: Id
+    parentTaskId?: Id,
+    executor: ExecutorName = "codex"
   ): { taskId: Id; baseHead: string | null } {
     const { taskId } = this.tasks.runTask({
       workspace_id: workspaceId,
-      instruction
+      instruction,
+      executor
     }, normalizeTrailingLf, async (result) => {
       const proposal = this.proposals.get(result.id);
       if (result.state === "failed") {
@@ -228,6 +234,7 @@ export class ControlledPatchService {
       base,
       state: "proposed",
       parentTaskId,
+      executor,
       output: undefined
     });
     this.tasks.pinTask(taskId);
@@ -259,6 +266,7 @@ export class ControlledPatchService {
         ...(proposal.base.kind === "unborn" ? { unborn: true } : {}),
         state: proposal.state,
         ...(proposal.parentTaskId === undefined ? {} : { parent_task_id: proposal.parentTaskId }),
+        executor: proposal.executor,
         output: proposal.output
       });
     }
@@ -484,6 +492,16 @@ function parseRetainedProposal(item: unknown): RetainedProposal | undefined {
   } catch {
     return undefined;
   }
+  // The retained executor is honest state: records written before executor
+  // selection default to codex, and anything else is quarantined rather than
+  // silently downgraded (a "gemini" record must never claim codex semantics).
+  const rawExecutor = item.executor;
+  const executor: ExecutorName | undefined = rawExecutor === undefined
+    ? "codex"
+    : rawExecutor === "codex" || rawExecutor === "dsh"
+      ? rawExecutor
+      : undefined;
+  if (executor === undefined) return undefined;
   return {
     taskId: item.task_id,
     workspaceId: item.workspace_id,
@@ -491,6 +509,7 @@ function parseRetainedProposal(item: unknown): RetainedProposal | undefined {
     base,
     state: item.state as Proposal["state"],
     parentTaskId: item.parent_task_id as Id | undefined,
+    executor,
     output: item.output
   };
 }

@@ -15,7 +15,7 @@
 - `run_task.executor` 是可选枚举 `"codex" | "dsh"`，省略时必须规范化为 `"codex"`。所有旧调用的路径、状态和结果保持不变。
 - 第一阶段只交付只读 `run_task` 到 DSH 的路由，以及 DSH 最终文本通过现有 `task_result` 生命周期回传。
 - 现有 Codex 执行路径、默认行为、workspace 注册与权限检查均不迁移、不重写。
-- `generate_controlled_patch`、`refine_controlled_patch`、精确 `APPLY` 与 `apply_controlled_patch` 继续只走现有 Codex 默认路径；本版本不把它们路由到 DSH，也不改变其状态、持久化或安全检查。
+- 第一阶段范围内，`generate_controlled_patch`、`refine_controlled_patch`、精确 `APPLY` 与 `apply_controlled_patch` 继续只走现有 Codex 默认路径，不把它们路由到 DSH，也不改变其状态、持久化或安全检查；其中 `generate`/`refine` 的该限制已由下文「后续 task：controlled-patch proposal 可选 executor」按 per-call 选择放宽，`apply_controlled_patch` 维持本行全部语义不变（不接受 executor、不调用任何模型、Bridge 自行校验并 git apply）。
 - Bridge 只负责调度与控制边界。它不读取、合并、覆盖或管理 DSH/Codex 各自的插件、skills、persona、preset、provider、模型配置或工作台装修。
 - 两张工作台可在 Bridge 之外独立定制；本版本不建设插件生态，只保留这条未来可独立装修的边界。
 - DSH 接入必须优先使用官方稳定机器接口（官方 SDK 或官方 JSON-RPC seam）。若当前 rc 接口不足，兼容代码只能存在于极薄的 `DshExecutor` adapter 内，不得侵入或 fork DSH。
@@ -72,7 +72,7 @@ export type ExecutorFactory = (
 - `src/executors/executor.ts`：现有 `ExecutorRequest`/`ExecutorResult` seam 已足够，预期零改动；若真实官方接口证明不够，必须先停止并修订本计划。
 - `src/executors/dsh-executor.ts`：新增极薄 adapter。只把 workspace root、instruction 和只读约束映射到已验证的官方机器接口，并把最终文本/安全错误映射为现有 `ExecutorResult`。
 - `src/tasks/registered-workspace-task-service.ts`：加入 `ExecutorName`、默认值规范化、per-task 元数据保存，以及按名称调用 `ExecutorFactory`；不改变既有状态机和 workspace 权限解析。
-- `src/mcp-stdio.ts`：给 `run_task` 增加可选 `executor` 参数，并在唯一工厂分支创建 `CodexExecutor` 或 `DshExecutor`；其他 MCP tools 不接收 executor 参数。
+- `src/mcp-stdio.ts`：给 `run_task` 增加可选 `executor` 参数，并在唯一工厂分支创建 `CodexExecutor` 或 `DshExecutor`；第一阶段除 `run_task` 外的其他 MCP tools 不接收 executor 参数（`generate_controlled_patch`/`refine_controlled_patch` 的 executor 参数由下文后续 task 引入）。
 - `src/core/errors.ts`：仅在 DSH adapter 需要安全、可区分的失败映射时增加与现有模式对称的 `DSH_UNAVAILABLE`、`DSH_PROTOCOL_ERROR`、`DSH_EXECUTION_FAILED`；不得暴露原始 stderr、配置或凭据。
 - `tests/unit/tasks/registered-workspace-task-service.test.ts`：覆盖默认选择、显式选择、task 内选择固定及 Codex 旧路径不变。
 - `tests/unit/executors/dsh-executor.test.ts`：新增 adapter 的 focused tests，使用可注入的官方 client/process seam，不依赖开发机 DSH 配置。
@@ -139,6 +139,20 @@ DSH 官方 SDK 若需要新增依赖，必须先由人工确认官方包名、�
   ```
 
   人工核对 diff 只包含本节列出的最小文件；不得出现 README、`package.json`、lockfile、版本号、GUI、插件生态、provider/model 配置或无关重构。
+
+## 后续 task（已批准）：controlled-patch proposal 可选 executor
+
+> 本 task 放宽上文对 proposal 生成/refine 的 Codex-only 限制，是 proposal 路由的当前边界真源；`apply_controlled_patch` 不在放宽范围内，语义保持上文与本节不变。
+
+- `generate_controlled_patch` 接受可选 `executor: "codex" | "dsh"`，省略时默认 `"codex"`。
+- `refine_controlled_patch` 接受可选 `executor: "codex" | "dsh"`，省略时默认 `"codex"`。
+- executor 选择是 per-call 的；refine 不要求继承 parent proposal 的 executor，parent 为 dsh 时省略 executor 的 refine 仍默认 codex。
+- DSH 可以生成 retained read-only proposal，经现有 generate/refine 返回与 retained 状态生命周期交付 human review；proposal generation 仍然不写工作区。
+- proposal task 继续走现有 legacy/non-interactive 任务路径，不升级为交互任务；不新增 `waiting_for_supervisor_review`、review_output、continue、steer、interrupt 或 accept 语义。
+- retained proposal 记录真实 executor 并持久化；旧记录缺省为 codex；非法 executor 按现有 retained-state fail-closed / quarantine 语义处理，不得静默降级为 codex。retained envelope 保持 version 1 向后兼容（可选字段，不 bump state version）。
+- DSH proposal generation 失败时沿用现有失败清理语义（不伪装成功、unpin/delete、不留下不可用 retained proposal），复用现有 `DSH_UNAVAILABLE`、`DSH_PROTOCOL_ERROR`、`DSH_EXECUTION_FAILED` 错误码，不新增错误码。
+- `apply_controlled_patch` 不接受 executor，不调用任何模型（不调用 Codex 也不调用 DSH）；仍要求 write authorization、base HEAD 与 clean worktree 校验、parser 与 `git apply --check` 检查、精确 `"APPLY"` 确认，并仍由 Bridge 自己 `git apply`。DSH 始终不获得直接写工作区的权限。
+- 不改变 executor architecture：proposal task 复用现有 `Executor` seam 与唯一 `ExecutorFactory` 分支；不新增 session/resume 语义、executor registry、selector 或 provider 层。
 
 ## 完成判据
 

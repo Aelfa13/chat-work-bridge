@@ -109,12 +109,12 @@ export class RegisteredWorkspaceTaskService {
     this.trimLegacyTerminalTasks();
   }
 
-  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean): void {
+  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName = "codex"): void {
     if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
       throw new CoreError("INTERNAL_ERROR");
     }
     const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
-    this.tasks.set(taskId, { state: "completed", executor: "codex", result });
+    this.tasks.set(taskId, { state: "completed", executor, result });
     this.legacyTerminalTaskIds.push(taskId);
     if (pinned) this.pinnedTaskIds.add(taskId);
     this.trimLegacyTerminalTasks();

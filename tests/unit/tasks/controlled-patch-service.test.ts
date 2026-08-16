@@ -1462,3 +1462,184 @@ test("keeps a refine chain usable across restart when refining a restored child"
   assert.equal(applied.applied, true);
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "refined after\n");
 });
+
+test("generate routes an explicit dsh executor to the factory and reports dsh in taskView", async () => {
+  const root = repository();
+  const factoryCalls: string[] = [];
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, (executor) => {
+    factoryCalls.push(executor);
+    return { execute: async () => ({ kind: "completed", output: validPatch }) };
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+  const generated = await controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note",
+    executor: "dsh"
+  });
+  await terminal(tasks, generated.taskId);
+
+  assert.deepEqual(factoryCalls, ["dsh"]);
+  assert.equal(tasks.taskView(generated.taskId)?.executor, "dsh");
+});
+
+test("generate without executor keeps the codex default", async () => {
+  const root = repository();
+  const factoryCalls: string[] = [];
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, (executor) => {
+    factoryCalls.push(executor);
+    return { execute: async () => ({ kind: "completed", output: validPatch }) };
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  await terminal(tasks, generated.taskId);
+
+  assert.deepEqual(factoryCalls, ["codex"]);
+  assert.equal(tasks.taskView(generated.taskId)?.executor, "codex");
+});
+
+test("refine selects the executor per call and never inherits the parent proposal's executor", async () => {
+  const root = repository();
+  const factoryCalls: string[] = [];
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, (executor) => {
+    factoryCalls.push(executor);
+    return { execute: async () => ({ kind: "completed", output: validPatch }) };
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+  const source = await controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note",
+    executor: "dsh"
+  });
+  await terminal(tasks, source.taskId);
+
+  const refinedDsh = await controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "adjust",
+    executor: "dsh"
+  });
+  await terminal(tasks, refinedDsh.taskId);
+  const refinedDefault = await controlled.refine({
+    patch_task_id: source.taskId,
+    change_request: "polish"
+  });
+  await terminal(tasks, refinedDefault.taskId);
+
+  assert.deepEqual(factoryCalls, ["dsh", "dsh", "codex"]);
+  assert.equal(tasks.taskView(refinedDsh.taskId)?.executor, "dsh");
+  assert.equal(tasks.taskView(refinedDefault.taskId)?.executor, "codex");
+});
+
+test("persists the proposal executor and restores a dsh proposal after restart", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const first = fixture(root, async () => ({ kind: "completed", output: validPatch }), undefined, stateFilePath);
+  const generated = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note",
+    executor: "dsh"
+  });
+  await terminal(first.tasks, generated.taskId);
+
+  const state = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; executor?: unknown }>;
+  };
+  assert.equal(state.proposals.find(({ task_id }) => task_id === generated.taskId)?.executor, "dsh");
+
+  const restarted = fixture(
+    root,
+    async () => { throw new Error("restored tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await restarted.controlled.load();
+
+  assert.deepEqual(restarted.tasks.taskView(generated.taskId), {
+    taskId: generated.taskId,
+    state: "completed",
+    executor: "dsh",
+    ready: true,
+    output: validPatch
+  });
+});
+
+test("restores a legacy retained proposal without an executor field as codex", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [{
+      task_id: "00000000-0000-4000-8000-000000000001",
+      workspace_id: "workspace",
+      workspace_root: root,
+      base_head: head,
+      state: "proposed",
+      output: validPatch
+    }]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  assert.equal(tasks.taskView("00000000-0000-4000-8000-000000000001")?.executor, "codex");
+});
+
+test("quarantines a retained proposal with an invalid executor instead of downgrading to codex", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [
+      retainedRecord("00000000-0000-4000-8000-000000000001", root, head),
+      retainedRecord("00000000-0000-4000-8000-000000000002", root, head, { executor: "gemini" })
+    ]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.deepEqual([...proposals.keys()], ["00000000-0000-4000-8000-000000000001"]);
+  assert.equal(tasks.taskView("00000000-0000-4000-8000-000000000002"), undefined);
+  assert.equal(tasks.result("00000000-0000-4000-8000-000000000002"), undefined);
+  await expectCode(() => controlled.apply({
+    patch_task_id: "00000000-0000-4000-8000-000000000002",
+    confirmation: "APPLY"
+  }), "INVALID_STATE_TRANSITION");
+});
+
+test("applies a dsh-generated proposal without invoking any executor again", async () => {
+  const root = repository();
+  let executions = 0;
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => {
+    executions += 1;
+    return { execute: async () => ({ kind: "completed", output: validPatch }) };
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+  const generated = await controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note",
+    executor: "dsh"
+  });
+  await terminal(tasks, generated.taskId);
+  assert.equal(executions, 1);
+
+  const applied = await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+
+  assert.deepEqual(applied.changed_paths, ["note.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+  assert.equal(executions, 1);
+});

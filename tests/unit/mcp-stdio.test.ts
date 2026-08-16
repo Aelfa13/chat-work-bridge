@@ -486,3 +486,85 @@ test("authorize_workspace_write persists for managed workspaces and rejects manu
     await client.close();
   }
 });
+
+test("generate_controlled_patch and refine_controlled_patch accept omitted/codex/dsh executor and reject unknown values", async () => {
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-patch-executor-"));
+  const configPath = join(configDir, "workspaces.json");
+  writeFileSync(configPath, "[]\n");
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+
+  const call = async (name: string, args: Record<string, unknown>): Promise<{ isError: boolean; body: unknown }> => {
+    const result = await client.callTool({ name, arguments: args });
+    const content = result.content as ToolResult["content"];
+    const text = content[0]?.text ?? "";
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { raw: text };
+    }
+    return { isError: result.isError === true, body };
+  };
+
+  try {
+    await client.connect(transport);
+
+    // Omitted, explicit codex, and explicit dsh all pass the schema; the
+    // business layer then fails on the missing workspace, proving the request
+    // reached the handler with the executor field accepted.
+    for (const args of [
+      { workspace_id: "missing", change_request: "change" },
+      { workspace_id: "missing", change_request: "change", executor: "codex" },
+      { workspace_id: "missing", change_request: "change", executor: "dsh" }
+    ]) {
+      const generated = await call("generate_controlled_patch", args);
+      assert.equal(generated.isError, true);
+      assert.deepEqual(generated.body, {
+        error: {
+          code: "UNKNOWN_WORKSPACE",
+          message: "The requested workspace is not registered."
+        }
+      });
+    }
+    for (const args of [
+      { patch_task_id: "missing", change_request: "refine" },
+      { patch_task_id: "missing", change_request: "refine", executor: "codex" },
+      { patch_task_id: "missing", change_request: "refine", executor: "dsh" }
+    ]) {
+      const refined = await call("refine_controlled_patch", args);
+      assert.equal(refined.isError, true);
+      assert.deepEqual(refined.body, {
+        error: {
+          code: "INVALID_STATE_TRANSITION",
+          message: "The requested state transition is not allowed."
+        }
+      });
+    }
+
+    // Unknown executor values are rejected by the schema before any business
+    // logic: the structured business error must not appear.
+    const unknownGenerate = await call("generate_controlled_patch", {
+      workspace_id: "missing",
+      change_request: "change",
+      executor: "unknown"
+    });
+    assert.equal(unknownGenerate.isError, true);
+    assert.equal(JSON.stringify(unknownGenerate.body).includes("UNKNOWN_WORKSPACE"), false);
+
+    const unknownRefine = await call("refine_controlled_patch", {
+      patch_task_id: "missing",
+      change_request: "refine",
+      executor: "unknown"
+    });
+    assert.equal(unknownRefine.isError, true);
+    assert.equal(JSON.stringify(unknownRefine.body).includes("INVALID_STATE_TRANSITION"), false);
+  } finally {
+    await client.close();
+  }
+});

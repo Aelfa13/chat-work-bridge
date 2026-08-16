@@ -192,11 +192,12 @@ async function main(): Promise<void> {
     description: "Generate a read-only patch proposal for review in any registered Git workspace; generation requires no write authorization, and controlled-write authorization is required only to APPLY.",
     inputSchema: {
       workspace_id: z.string().min(1),
-      change_request: z.string().min(1)
+      change_request: z.string().min(1),
+      executor: z.enum(["codex", "dsh"]).optional().default("codex")
     }
-  }, async ({ workspace_id, change_request }) => {
+  }, async ({ workspace_id, change_request, executor }) => {
     try {
-      const proposal = await controlledPatches.generate({ workspace_id, change_request });
+      const proposal = await controlledPatches.generate({ workspace_id, change_request, executor });
       return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };
@@ -207,11 +208,12 @@ async function main(): Promise<void> {
     description: "Refine a completed retained patch proposal into a new complete read-only proposal against the same base HEAD.",
     inputSchema: {
       patch_task_id: z.string().min(1),
-      change_request: z.string().min(1)
+      change_request: z.string().min(1),
+      executor: z.enum(["codex", "dsh"]).optional().default("codex")
     }
-  }, async ({ patch_task_id, change_request }) => {
+  }, async ({ patch_task_id, change_request, executor }) => {
     try {
-      const proposal = await controlledPatches.refine({ patch_task_id, change_request });
+      const proposal = await controlledPatches.refine({ patch_task_id, change_request, executor });
       return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };
