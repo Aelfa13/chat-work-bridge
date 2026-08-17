@@ -1,5 +1,15 @@
 # Release notes
 
+## Unreleased
+
+Controlled-patch proposals can now be generated and refined by either executor, while application remains a deterministic, model-free step.
+
+- `generate_controlled_patch` and `refine_controlled_patch` accept an optional `executor: "codex" | "dsh"`, selected per call and defaulting to `codex` when omitted; refinement never inherits the source proposal's executor.
+- DSH-generated proposals use the same retained read-only proposal lifecycle and exact `APPLY` flow as Codex proposals, including restart retention. `apply_controlled_patch` itself takes no executor and invokes no model.
+- Retained proposals persist their executor; legacy records without the field restore as `codex`, records with an invalid executor value are quarantined fail-closed, and restored tasks report the real executor.
+
+The v1.2.1 Windows validation boundary is unchanged; full multi-client / all-Windows certification is not claimed.
+
 ## v1.2.1
 
 v1.2.1 is a Windows launch-compatibility patch for both executors. The DSH executor itself was added in v1.2.0; v1.2.1 does not add an executor, it fixes how npm-installed Codex and DSH CLIs are resolved and launched on Windows.
