@@ -60,7 +60,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **规划端与执行端各司其职。** Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
 - **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
 - **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
-- **当前实现 Codex 与 DSH 两个执行器。** `run_task` 可选 `executor: "codex" | "dsh"`（默认 `codex`）。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持。
+- **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持。
 
 ## 一个真实案例
 
@@ -70,7 +70,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 
 | 当前可用 | 当前不会做 | Roadmap——不是当前支持 |
 | --- | --- | --- |
-| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task` 可选 Codex 或 DSH（默认 Codex） | 不自动测试、stage、commit、push 或创建 Release | workspace GUI/manager |
+| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | 不自动测试、stage、commit、push 或创建 Release | workspace GUI/manager |
 | 在 `project_root` 内用精确 `BIND`/`CREATE` 绑定或创建工作区 | 不是 OS 级读取隔离 | 其他 CLI agent 逐个适配 |
 | 写入前生成完整 Git 补丁；managed 工作区经精确 `AUTHORIZE` 后受控写入 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | DSH 原生 headless session resume |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有自动超时 | 持久 task/audit 历史 |
@@ -176,8 +176,8 @@ git -C /absolute/path/to/my-project status --short
 ```
 
 1. 确认配置根目录就是 Git 顶层，且 tracked 工作树和 index 均干净（已有 HEAD，或支持 unborn 仓库的新增文件提案）。
-2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求。这是独立的受控补丁流程，不使用交互式 `run_task` 监督流；**生成/refine 是只读提案，可在任意已登记工作区进行，无需写授权**。
-3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求；它会保留原提案，基于同一个 `base_head` 返回新的完整提案。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
+2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求（可选 `executor: "codex" | "dsh"`，默认 `codex`）。这是独立的受控补丁流程，不使用交互式 `run_task` 监督流；**生成/refine 是只读提案，可在任意已登记工作区进行，无需写授权**。
+3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求（同样可选 `executor: "codex" | "dsh"`，默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。它会保留原提案，基于同一个 `base_head` 返回新的完整提案。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
 4. 在任务状态之外，按 `generate_controlled_patch` → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。managed 工作区在 APPLY 前如有需要先完成 `AUTHORIZE`。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。
 5. 检查结果：
 

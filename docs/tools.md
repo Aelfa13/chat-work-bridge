@@ -54,15 +54,15 @@ Grants persistent controlled-write permission to one managed workspace only; man
 
 ## `generate_controlled_patch`
 
-Inputs: `workspace_id`, `change_request`.
+Inputs: `workspace_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`).
 
 Read-only proposal flow available in any registered workspace; no write authorization is required to generate. It verifies that the configured root resolves to the Git top-level and that tracked state and the index are clean (with an existing HEAD, or unborn-repository support for added-file proposals), records and returns `base_head`, and starts a separate read-only proposal task that does not modify files. The proposal and its applied history persist to `<config>.controlled-patches.json`.
 
 ## `refine_controlled_patch`
 
-Inputs: `patch_task_id`, `change_request`.
+Inputs: `patch_task_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`).
 
-Read-only refinement of a completed controlled-patch proposal: returns a new complete proposal against the same `base_head`, preserving the source proposal. Requires the source task to be `completed` and the workspace base to be unchanged. No write authorization is required; it never modifies files.
+Read-only refinement of a completed controlled-patch proposal: returns a new complete proposal against the same `base_head`, preserving the source proposal. The executor is selected per call and defaults to `codex`; it is not inherited from the parent proposal. Requires the source task to be `completed` and the workspace base to be unchanged. No write authorization is required; it never modifies files.
 
 ## `apply_controlled_patch`
 

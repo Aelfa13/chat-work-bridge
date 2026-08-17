@@ -60,7 +60,7 @@ The controlled-write rule is simple: **show the diff first, write only after exa
 - **Planning and execution have distinct jobs.** Chat shapes the goal; local Codex inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
 - **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
 - **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
-- **Two executors are implemented: Codex and DSH.** `run_task` accepts an optional `executor: "codex" | "dsh"` (default `codex`). Other CLI agents remain a future, adapter-by-adapter direction—not current support.
+- **Two executors are implemented: Codex and DSH.** `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` each accept an optional `executor: "codex" | "dsh"` (default `codex`); the executor is selected per call, and `refine_controlled_patch` does not inherit the parent proposal's executor. `apply_controlled_patch` has no executor/model call—Bridge validates and applies the patch itself. Other CLI agents remain a future, adapter-by-adapter direction—not current support.
 
 ## A real project example
 
@@ -70,7 +70,7 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 
 | Available today | Does not do today | Roadmap—not current support |
 | --- | --- | --- |
-| Read-only analysis, code location, and review in a pre-registered workspace; `run_task` selects Codex or DSH (Codex by default) | Does not automatically test, stage, commit, push, or create a Release | Workspace GUI/manager |
+| Read-only analysis, code location, and review in a pre-registered workspace; `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` select Codex or DSH per call (Codex by default) | Does not automatically test, stage, commit, push, or create a Release | Workspace GUI/manager |
 | Bind or create and register a workspace inside `project_root` with exact `BIND`/`CREATE` | Not OS-level read isolation | Adapt other CLI agents one at a time |
 | Generate a complete Git patch before any write; controlled writes for managed workspaces after exact `AUTHORIZE` | No HTTP, UI, account system, caller authentication, or remote transport | DSH native headless session resume |
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation; unborn repositories support added 100644 text files | Does not persist task/thread/evidence supervision history; no automatic timeout | Persistent task/audit history |
@@ -176,8 +176,8 @@ Controlled-write permission is set per workspace source: manual workspaces set `
 ```
 
 1. Confirm the configured root is the Git top-level and the tracked worktree and index are clean (with an existing HEAD, or unborn-repository support for added-file proposals).
-2. Call `generate_controlled_patch` with the workspace ID and a narrow request. This is a separate controlled-patch flow, not the interactive `run_task` supervision flow; **generation/refinement is a read-only proposal and works in any registered workspace without write authorization**.
-3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. If it needs correction, call `refine_controlled_patch` with the completed patch task ID and a refinement request; it retains the source and returns a new complete proposal against the same `base_head`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
+2. Call `generate_controlled_patch` with the workspace ID and a narrow request (optionally passing `executor: "codex" | "dsh"`, default `codex`). This is a separate controlled-patch flow, not the interactive `run_task` supervision flow; **generation/refinement is a read-only proposal and works in any registered workspace without write authorization**.
+3. Poll the returned patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. If it needs correction, call `refine_controlled_patch` with the completed patch task ID and a refinement request (also optionally passing `executor: "codex" | "dsh"`, default `codex`); the executor is selected per call and `refine_controlled_patch` does not inherit the parent proposal's executor. It retains the source and returns a new complete proposal against the same `base_head`. Proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
 4. Outside task state, follow `generate_controlled_patch` → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. For managed workspaces, complete `AUTHORIZE` first if needed. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
 5. Inspect the result:
 
