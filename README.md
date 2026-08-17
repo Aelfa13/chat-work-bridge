@@ -1,6 +1,6 @@
 # Engineering Bridge
 
-**打通 Chat 与本地 Codex：不再搬提示词，Chat 直接调度、监督并验收 Codex。**
+**打通 Chat 与本地 Codex 与 Deepseek harness：不再搬提示词，Chat 直接调度、监督并验收 Codex 与 Deepseek harness。**
 
 [![Stable v1.2.1](https://img.shields.io/badge/stable-v1.2.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
@@ -35,7 +35,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 
 ## 为什么需要一座桥？
 
-普通聊天不能天然读取你电脑上的项目，也不能启动本机 Codex。Engineering Bridge 在两者之间提供一个本地、预登记且受范围限制的入口，让对话负责理解目标，本机 Codex 负责查看真实代码，Bridge 负责传递任务并守住边界。
+普通聊天不能天然读取你电脑上的项目，也不能启动本机的harness，比如 Codex 或者 DeepSeek harness。而chat窗口拥有更多的推理能力与内置skill，Engineering Bridge 在两者之间提供一个本地、预登记且受范围限制的入口，让对话负责理解目标，本机 harness负责查看、操作真实代码，Bridge 负责传递任务并守住边界。
 
 这里有四个角色：
 
@@ -60,7 +60,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **规划端与执行端各司其职。** Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
 - **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
 - **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
-- **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持。
+- **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持，但原理上皆通。
 
 ## 一个真实案例
 
