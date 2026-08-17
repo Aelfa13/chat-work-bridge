@@ -1,6 +1,6 @@
 # Engineering Bridge
 
-**Connect Chat directly to local Codex: no more shuttling prompts and results—Chat dispatches, supervises, and accepts Codex work.**
+**Connect Chat directly to local Codex or DSH: no more shuttling prompts and results—Chat dispatches, supervises, and accepts the executor's work.**
 
 [![Stable v1.2.1](https://img.shields.io/badge/stable-v1.2.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
@@ -16,9 +16,11 @@
 
 ```mermaid
 flowchart LR
-    A[Chat describes goal] --> B[Bridge selects pre-registered workspace]
-    B --> C[Local Codex / DSH: read-only inspection or patch proposal]
-    C --> D[Result returns to Chat]
+    A[Chat describes goal] --> B[Bridge selects pre-registered workspace and executor]
+    B -->|executor: codex| C1[Local Codex: read-only inspection or patch proposal]
+    B -->|executor: dsh| C2[Local DSH: read-only inspection or patch proposal]
+    C1 --> D[Result returns to Chat]
+    C2 --> D
     D --> E[Human reviews]
     E -->|exact APPLY| F[Revalidate and write under controls]
 ```
@@ -31,11 +33,11 @@ Everything above is a local process connection over MCP/STDIO. There is no HTTP 
 
 Engineering Bridge is a small “engineering bridge” that runs on your computer. You describe what you want to understand or change in a compatible chat client; it hands the task to local Codex or DSH (Codex by default), lets the executor inspect a pre-registered project, and brings the analysis or patch back into the conversation.
 
-It is for people who want conversational help understanding and reviewing code, as well as developers who want explicit control over writes. You do not need to read a protocol specification first, but you do need to configure Node.js, Git, Codex CLI, and an MCP client once. A browser-only chat cannot use it directly.
+It is for people who want conversational help understanding and reviewing code, as well as developers who want explicit control over writes. You do not need to read a protocol specification first, but you do need to configure Node.js, Git, an executor CLI (Codex and/or DSH), and an MCP client once. A browser-only chat cannot use it directly.
 
 ## Why is a bridge needed?
 
-A normal chat cannot inherently read projects on your computer or launch local Codex. Engineering Bridge provides a local, pre-registered, scope-limited entry point between them: the conversation understands the goal, local Codex examines the real code, and Bridge carries the task while enforcing boundaries.
+A normal chat cannot inherently read projects on your computer or launch local Codex or DSH. Engineering Bridge provides a local, pre-registered, scope-limited entry point between them: the conversation understands the goal, the local executor (Codex or DSH) examines the real code, and Bridge carries the task while enforcing boundaries.
 
 There are four roles:
 
@@ -55,9 +57,9 @@ The controlled-write rule is simple: **show the diff first, write only after exa
 
 ## Why control a local agent through chat?
 
-- **The conversation continues.** Requirements, trade-offs, and earlier results remain part of planning instead of being manually ferried between ChatGPT, the terminal, and Codex.
+- **The conversation continues.** Requirements, trade-offs, and earlier results remain part of planning instead of being manually ferried between ChatGPT, the terminal, and Codex or DSH.
 - **Memory can inform planning.** A client's global memory or an external memory system may contribute context, but memory is not built into Bridge.
-- **Planning and execution have distinct jobs.** Chat shapes the goal; local Codex inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
+- **Planning and execution have distinct jobs.** Chat shapes the goal; the local executor (Codex or DSH) inspects the actual workspace and produces evidence or a patch; Bridge scopes and validates the handoff.
 - **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
 - **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
 - **Two executors are implemented: Codex and DSH.** `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` each accept an optional `executor: "codex" | "dsh"` (default `codex`); the executor is selected per call, and `refine_controlled_patch` does not inherit the parent proposal's executor. `apply_controlled_patch` has no executor/model call—Bridge validates and applies the patch itself. Other CLI agents remain a future, adapter-by-adapter direction—not current support.
@@ -84,6 +86,11 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 You need Node.js 22+, Git, an installed and authenticated `codex` and/or `dsh` CLI available on `PATH` (depending on the `executor` you use), a local project, an MCP client that can launch a local STDIO server, and basic terminal familiarity.
 
 For controlled writes, the project must also be a clean Git top-level (with an existing HEAD, or with unborn-repository support for added-file proposals), and controlled-write permission must be ready: manual workspaces set `allow_write: true` in their registration, managed workspaces authorize through `authorize_workspace_write` with exact `AUTHORIZE`.
+
+**Per executor:**
+
+- **Codex:** install and authenticate the `codex` CLI so it is callable from `PATH`. Bridge launches Codex through `codex app-server --stdio`: no shell, approval `never`, network disabled.
+- **DSH:** install the official npm package `@deepseek-ai/dsh`; `dsh` must be callable from `PATH` or resolvable by Bridge through the `DSH_HOME`/`~/.dsh` profiles fallback. If `DEEPSEEK_API_KEY` is set in the environment Bridge runs under, Bridge forwards it to DSH—it is the only credential environment variable Bridge forwards. Keep it out of config files (see section 4). Bridge launches DSH with `dsh --profile headless <instruction>` and pins `DSH_PERMISSION_MODE=read-only` itself—do not set it yourself. `DSH_TOOLS_MODE` is an optional passthrough; proxy variables are not forwarded.
 
 ### 2. Clone, install, and build
 
@@ -130,12 +137,14 @@ Client schemas and configuration locations differ; translate these generic field
     "/absolute/path/to/engineering-bridge/workspaces.json"
   ],
   "env": {
-    "PATH": "/path/that/includes/node-and-codex"
+    "PATH": "/path/that/includes-node-and-your-executor"
   }
 }
 ```
 
 Use absolute paths. If the client already supplies a suitable `PATH`, the `env` override may be omitted. Do not copy this shape unchanged into a client with a different schema.
+
+If you use DSH and `DEEPSEEK_API_KEY` is set in the environment Bridge runs under (for example, your shell or launcher environment), Bridge forwards it to DSH—it is the only credential environment variable Bridge forwards. Do not put it in the `env` override here or in any config file—secrets do not belong in configuration.
 
 Reconnect the integration and confirm these nine current V1 tools are visible:
 

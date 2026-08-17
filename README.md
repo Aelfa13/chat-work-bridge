@@ -16,9 +16,11 @@
 
 ```mermaid
 flowchart LR
-    A[Chat 描述目标] --> B[Bridge 选择预登记工作区]
-    B --> C[本机 Codex / DSH：只读检查或生成补丁]
-    C --> D[结果回到 Chat]
+    A[Chat 描述目标] --> B[Bridge 选择预登记工作区与执行器]
+    B -->|executor: codex| C1[本机 Codex：只读检查或生成补丁]
+    B -->|executor: dsh| C2[本机 DSH：只读检查或生成补丁]
+    C1 --> D[结果回到 Chat]
+    C2 --> D
     D --> E[人审阅]
     E -->|精确 APPLY| F[重新校验并受控写入]
 ```
@@ -31,7 +33,7 @@ flowchart LR
 
 Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。你在兼容的聊天客户端里说清楚想了解或修改什么，它把任务交给本机 Codex 或 DSH（默认 Codex），在预先登记的项目中检查代码，再把分析结果或补丁带回对话。
 
-它适合希望借助对话理解和审阅代码的人，也适合需要保留明确写入控制的开发者。你不必先会读协议文档，但仍需要完成一次 Node.js、Git、Codex CLI 和 MCP 客户端配置；仅有普通浏览器聊天无法直接使用它。
+它适合希望借助对话理解和审阅代码的人，也适合需要保留明确写入控制的开发者。你不必先会读协议文档，但仍需要完成一次 Node.js、Git、执行器 CLI（Codex 和/或 DSH）和 MCP 客户端配置；仅有普通浏览器聊天无法直接使用它。
 
 ## 为什么需要一座桥？
 
@@ -55,9 +57,9 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 
 ## 为什么通过 Chat 控制本地 Agent？
 
-- **对话上下文延续。** 需求、取舍和此前结果可以继续参与规划，不必在 ChatGPT、终端与 Codex 之间手工搬运。
+- **对话上下文延续。** 需求、取舍和此前结果可以继续参与规划，不必在 ChatGPT、终端与 Codex 或 DSH 之间手工搬运。
 - **记忆可以参与规划。** 客户端的全局记忆或外部 memory 系统可以提供上下文，但 memory 不是 Bridge 自带的能力。
-- **规划端与执行端各司其职。** Chat 梳理目标；本机 Codex 检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
+- **规划端与执行端各司其职。** Chat 梳理目标；本机执行器（Codex 或 DSH）检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
 - **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
 - **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
 - **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持，但原理上皆通。
@@ -84,6 +86,11 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 你需要 Node.js 22+、Git、已安装且已认证并能从 `PATH` 调用的 `codex` 和/或 `dsh` CLI（按你使用的 `executor`）、一个本地项目、能启动本地 STDIO 服务的 MCP 客户端，以及基本终端操作能力。
 
 受控写入还要求项目是干净的 Git 顶层（已有 HEAD，或支持 unborn 仓库的新增文件提案），并且受控写权限已就绪：manual 工作区在登记项中明确启用 `allow_write`，managed 工作区经 `authorize_workspace_write` 的精确 `AUTHORIZE` 授权。
+
+**按执行器准备：**
+
+- **Codex：** 安装并认证 `codex` CLI，使其可从 `PATH` 调用。Bridge 以 `codex app-server --stdio` 启动 Codex：不经过 shell，approval 为 `never`，网络禁用。
+- **DSH：** 安装官方 npm 包 `@deepseek-ai/dsh`；`dsh` 可从 `PATH` 调用，或由 Bridge 经 `DSH_HOME`/`~/.dsh` 的 profiles 回退路径找到。若 Bridge 运行环境的环境变量中设置了 `DEEPSEEK_API_KEY`，Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量；密钥不要写进配置文件（见第 4 节）。Bridge 以 `dsh --profile headless <指令>` 启动 DSH，并自行固定 `DSH_PERMISSION_MODE=read-only`——请勿自行设置该变量。`DSH_TOOLS_MODE` 是可选透传；proxy 变量不会转发。
 
 ### 2. Clone、安装与构建
 
@@ -130,12 +137,14 @@ V1 稳定版（`v1.2.1`）没有一键安装器。
     "/absolute/path/to/engineering-bridge/workspaces.json"
   ],
   "env": {
-    "PATH": "/path/that/includes/node-and-codex"
+    "PATH": "/path/that/includes-node-and-your-executor"
   }
 }
 ```
 
 请使用绝对路径。如果客户端已经提供合适的 `PATH`，可以省略 `env` 覆盖。不要把此结构原样套入使用其他 schema 的客户端。
+
+使用 DSH 时，若 `DEEPSEEK_API_KEY` 已设置在 Bridge 进程运行时的环境变量中（例如 shell 或启动器环境），Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量。不要把它写进这里的 `env` 覆盖或任何配置文件——密钥不应落入配置。
 
 重新连接集成，并确认能看到以下九个当前 V1 工具：
 
