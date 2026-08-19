@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
+import { CoreError } from "../../../src/core/errors.js";
 import type { SerializedError } from "../../../src/core/errors.js";
 import type { Id } from "../../../src/core/ids.js";
 import type { Executor, ExecutorRequest, ExecutorResult } from "../../../src/executors/executor.js";
@@ -203,7 +204,7 @@ test("records executor failures", async () => {
   assert.deepEqual(service.result(taskId), { id: taskId, state: "failed", error });
 });
 
-test("records an interrupted legacy task as an execution failure", async () => {
+test("records an interrupted legacy task as TASK_INTERRUPTED, not an executor failure", async () => {
   const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
   const { taskId } = service.runTask({ workspace_id: "known", instruction: "inspect" });
@@ -215,14 +216,14 @@ test("records an interrupted legacy task as an execution failure", async () => {
     id: taskId,
     state: "failed",
     error: {
-      code: "CODEX_EXECUTION_FAILED",
-      message: "Codex execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     },
     partial_output: "partial"
   });
 });
 
-test("records an interrupted DSH legacy task as DSH_EXECUTION_FAILED", async () => {
+test("records an interrupted DSH legacy task as TASK_INTERRUPTED, not DSH_EXECUTION_FAILED", async () => {
   let executorName: "codex" | "dsh" | undefined;
   const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), (name) => {
@@ -239,8 +240,8 @@ test("records an interrupted DSH legacy task as DSH_EXECUTION_FAILED", async () 
     id: taskId,
     state: "failed",
     error: {
-      code: "DSH_EXECUTION_FAILED",
-      message: "DSH execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     },
     partial_output: "partial"
   });
@@ -257,13 +258,13 @@ test("an interrupted legacy task without any partial output omits the field", as
     id: taskId,
     state: "failed",
     error: {
-      code: "CODEX_EXECUTION_FAILED",
-      message: "Codex execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
 
-test("records an interrupted interactive task as an execution failure without review output", async () => {
+test("records an interrupted interactive task as TASK_INTERRUPTED without review output", async () => {
   const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
   const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
@@ -280,13 +281,13 @@ test("records an interrupted interactive task as an execution failure without re
     evidence: [],
     partial_output: "partial",
     error: {
-      code: "CODEX_EXECUTION_FAILED",
-      message: "Codex execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
 
-test("records an interrupted DSH interactive task as DSH_EXECUTION_FAILED", async () => {
+test("records an interrupted DSH interactive task as TASK_INTERRUPTED, not DSH_EXECUTION_FAILED", async () => {
   let executorName: "codex" | "dsh" | undefined;
   const executor: Executor = { execute: async () => ({ kind: "interrupted", output: "partial" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), (name) => {
@@ -308,8 +309,8 @@ test("records an interrupted DSH interactive task as DSH_EXECUTION_FAILED", asyn
     evidence: [],
     partial_output: "partial",
     error: {
-      code: "DSH_EXECUTION_FAILED",
-      message: "DSH execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
@@ -325,8 +326,8 @@ test("an interrupted interactive task without any partial output omits the field
   assert.equal(view.state, "failed");
   assert.equal("partial_output" in view, false);
   assert.deepEqual(view.error, {
-    code: "CODEX_EXECUTION_FAILED",
-    message: "Codex execution failed."
+    code: "TASK_INTERRUPTED",
+    message: "The task was interrupted."
   });
 });
 
@@ -381,8 +382,8 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
     ready: true,
     evidence: [],
     error: {
-      code: "DSH_EXECUTION_FAILED",
-      message: "DSH execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
@@ -410,8 +411,8 @@ test("DSH interrupt keeps the cached partial stdout as partial_output on the fai
     evidence: [],
     partial_output: "partial answer",
     error: {
-      code: "DSH_EXECUTION_FAILED",
-      message: "DSH execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
@@ -440,8 +441,8 @@ test("DSH interrupt before any stdout omits partial_output", async () => {
     ready: true,
     evidence: [],
     error: {
-      code: "DSH_EXECUTION_FAILED",
-      message: "DSH execution failed."
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
     }
   });
 });
@@ -760,4 +761,140 @@ test("restoreControlledPatchTask honors an explicit dsh executor and defaults le
     ready: true,
     output: "codex output"
   });
+});
+
+test("control_task interrupt reaches a running legacy task's executor seam and finalizes as TASK_INTERRUPTED", async () => {
+  let release!: (result: ExecutorResult) => void;
+  const pending = new Promise<ExecutorResult>((done) => { release = done; });
+  let interrupts = 0;
+  const executor: Executor = {
+    execute: () => pending,
+    interrupt: async () => { interrupts += 1; release({ kind: "interrupted", output: "partial diff" }); }
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask({ workspace_id: "known", instruction: "generate" });
+
+  while (service.status(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(service.status(taskId)?.state, "running");
+
+  const view = await service.controlTask(taskId, "interrupt");
+  assert.equal(view.state, "running");
+  assert.equal(interrupts, 1);
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
+    },
+    partial_output: "partial diff"
+  });
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    executor: "codex",
+    ready: true,
+    partial_output: "partial diff",
+    error: {
+      code: "TASK_INTERRUPTED",
+      message: "The task was interrupted."
+    }
+  });
+});
+
+test("steer on a running DSH legacy task is unsupported; Codex keeps its steer seam", async () => {
+  const steers: string[] = [];
+  const releases: Array<(result: ExecutorResult) => void> = [];
+  const executorNames: string[] = [];
+  const reg = registry();
+  const service = new RegisteredWorkspaceTaskService(reg, (executorName) => {
+    executorNames.push(executorName);
+    const execute = () => new Promise<ExecutorResult>((done) => { releases.push(done); });
+    return executorName === "dsh"
+      ? { execute }
+      : { execute, steer: async (instruction) => { steers.push(instruction); } };
+  });
+
+  const dsh = service.runTask({ workspace_id: "known", instruction: "generate", executor: "dsh" });
+  while (service.status(dsh.taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await assert.rejects(
+    () => service.controlTask(dsh.taskId, "steer", "keep going"),
+    (error: unknown) => error instanceof CoreError && error.code === "UNSUPPORTED_ACTION"
+  );
+  releases[0]?.({ kind: "completed", output: "dsh done" });
+  await waitForTerminal(service, dsh.taskId);
+
+  const codex = service.runTask({ workspace_id: "known", instruction: "generate" });
+  while (service.status(codex.taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  const view = await service.controlTask(codex.taskId, "steer", "keep going");
+  assert.equal(view.state, "running");
+  assert.deepEqual(steers, ["keep going"]);
+  releases[1]?.({ kind: "completed", output: "codex done" });
+  await waitForTerminal(service, codex.taskId);
+
+  assert.deepEqual(executorNames, ["dsh", "codex"]);
+});
+
+test("steer on a running DSH interactive task is unsupported, not an invalid state transition", async () => {
+  let release!: (result: ExecutorResult) => void;
+  const pending = new Promise<ExecutorResult>((done) => { release = done; });
+  const service = new RegisteredWorkspaceTaskService(registry(), () => ({ execute: () => pending }));
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
+
+  while (service.taskView(taskId)?.state === "queued") {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await assert.rejects(
+    () => service.controlTask(taskId, "steer", "keep going"),
+    (error: unknown) => error instanceof CoreError && error.code === "UNSUPPORTED_ACTION"
+  );
+  release({ kind: "completed", output: "done" });
+  await waitForInteractiveReady(service, taskId);
+});
+
+test("restoreControlledPatchTask with submitted provenance reports no executor identity", async () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    throw new Error("restored tasks must not execute");
+  });
+  const submittedId = "00000000-0000-4000-8000-000000000003" as Id;
+  service.restoreControlledPatchTask(submittedId, "submitted diff", true, undefined, "submitted");
+
+  assert.deepEqual(service.taskView(submittedId), {
+    taskId: submittedId,
+    state: "completed",
+    source: "submitted",
+    ready: true,
+    output: "submitted diff"
+  });
+  assert.equal(service.taskView(submittedId)?.executor, undefined);
+  assert.equal("executor" in (service.taskView(submittedId) ?? {}), false);
+  const serialized = JSON.stringify(service.taskView(submittedId));
+  assert.equal(serialized.includes('"source":"submitted"'), true);
+  assert.equal(serialized.includes("executor"), false);
+});
+
+test("submitControlledPatchTask registers a retained completed task with submitted provenance", async () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    throw new Error("submitted tasks must not execute");
+  });
+  const { taskId } = service.submitControlledPatchTask("caller diff", true);
+
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "completed",
+    output: "caller diff"
+  });
+  const view = service.taskView(taskId);
+  assert.equal(view?.source, "submitted");
+  assert.equal(view?.executor, undefined);
+  assert.equal("executor" in (view ?? {}), false);
+  assert.equal(view?.state, "completed");
 });

@@ -1037,6 +1037,7 @@ function retainedRecord(
     workspace_root: root,
     base_head: head,
     state: "proposed",
+    executor: "codex",
     output: validPatch,
     ...overrides
   };
@@ -1642,4 +1643,318 @@ test("applies a dsh-generated proposal without invoking any executor again", asy
   assert.deepEqual(applied.changed_paths, ["note.txt"]);
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
   assert.equal(executions, 1);
+});
+
+test("submit_controlled_patch registers a retained submitted proposal that APPLY applies without any executor", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  let executions = 0;
+  const { controlled, tasks } = fixture(root, async () => {
+    executions += 1;
+    throw new Error("submitted tasks must not execute");
+  }, undefined, stateFilePath);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const submitted = await controlled.submit({ workspace_id: "workspace", base_head: head, diff: validPatch });
+
+  assert.equal(submitted.baseHead, head);
+  assert.equal(executions, 0);
+  assert.deepEqual(tasks.taskView(submitted.taskId), {
+    taskId: submitted.taskId,
+    state: "completed",
+    source: "submitted",
+    ready: true,
+    output: validPatch
+  });
+  assert.equal(tasks.taskView(submitted.taskId)?.executor, undefined);
+  assert.deepEqual(tasks.result(submitted.taskId), {
+    id: submitted.taskId,
+    state: "completed",
+    output: validPatch
+  });
+  // The retained record uses source: "submitted" and carries no executor field.
+  const state = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; executor?: unknown; source?: unknown }>;
+  };
+  const retained = state.proposals.find(({ task_id }) => task_id === submitted.taskId);
+  assert.ok(retained);
+  assert.equal(retained.source, "submitted");
+  assert.equal("executor" in retained, false);
+
+  const applied = await controlled.apply({ patch_task_id: submitted.taskId, confirmation: "APPLY" });
+  assert.deepEqual(applied.changed_paths, ["note.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+  assert.equal(executions, 0);
+});
+
+test("submit rejects a base_head that is not exactly the current commit HEAD", async () => {
+  const root = repository();
+  const { controlled, tasks } = fixture(root, async () => {
+    throw new Error("must not execute");
+  });
+  const head = git(root, "rev-parse", "HEAD").trim();
+  await expectCode(() => controlled.submit({
+    workspace_id: "workspace",
+    base_head: "0".repeat(40),
+    diff: validPatch
+  }), "WORKSPACE_PRECONDITION_FAILED");
+
+  // A previously correct base_head becomes stale once HEAD moves.
+  writeFileSync(join(root, "other.txt"), "commit\n");
+  git(root, "add", "other.txt");
+  git(root, "commit", "-qm", "move head");
+  await expectCode(() => controlled.submit({
+    workspace_id: "workspace",
+    base_head: head,
+    diff: validPatch
+  }), "WORKSPACE_PRECONDITION_FAILED");
+
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.equal(proposals.size, 0);
+});
+
+test("submit rejects unsafe diffs and dirty workspaces with the shared preflight without registering anything", async () => {
+  const root = repository();
+  const { controlled, tasks } = fixture(root, async () => {
+    throw new Error("must not execute");
+  });
+  const head = git(root, "rev-parse", "HEAD").trim();
+
+  for (const diff of [
+    "not a patch",
+    `\`\`\`diff\n${validPatch}\`\`\``,
+    validPatch.replaceAll("note.txt", "new.txt"),
+    additionPatch.replace("new file mode 100644", "new file mode 100755")
+  ]) {
+    await expectCode(() => controlled.submit({ workspace_id: "workspace", base_head: head, diff }),
+      "WORKSPACE_PRECONDITION_FAILED");
+  }
+
+  // A dirty worktree fails the same workspace preflight as generate and APPLY.
+  writeFileSync(join(root, "note.txt"), "dirty\n");
+  await expectCode(() => controlled.submit({ workspace_id: "workspace", base_head: head, diff: validPatch }),
+    "WORKSPACE_PRECONDITION_FAILED");
+
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.equal(proposals.size, 0);
+});
+
+test("submit requires no write authorization; APPLY still re-verifies it", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: false }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => {
+    throw new Error("submitted tasks must not execute");
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const submitted = await controlled.submit({ workspace_id: "workspace", base_head: head, diff: validPatch });
+  assert.equal(submitted.baseHead, head);
+
+  // APPLY still requires controlled-write authorization for submitted proposals.
+  await expectCode(() => controlled.apply({ patch_task_id: submitted.taskId, confirmation: "APPLY" }),
+    "WORKSPACE_PRECONDITION_FAILED");
+});
+
+test("a submitted proposal survives restart and APPLY re-verifies HEAD, workspace, patch safety, and write authorization", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const first = fixture(root, async () => { throw new Error("must not execute"); }, undefined, stateFilePath);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const submitted = await first.controlled.submit({ workspace_id: "workspace", base_head: head, diff: validPatch });
+
+  const restarted = fixture(root, async () => { throw new Error("restored tasks must not execute"); }, undefined, stateFilePath);
+  await restarted.controlled.load();
+
+  assert.deepEqual(restarted.tasks.taskView(submitted.taskId), {
+    taskId: submitted.taskId,
+    state: "completed",
+    source: "submitted",
+    ready: true,
+    output: validPatch
+  });
+  assert.equal(restarted.tasks.taskView(submitted.taskId)?.executor, undefined);
+  assert.deepEqual(restarted.tasks.result(submitted.taskId), {
+    id: submitted.taskId,
+    state: "completed",
+    output: validPatch
+  });
+
+  // HEAD drift is re-verified at APPLY: a new commit invalidates the submitted base.
+  writeFileSync(join(root, "other.txt"), "commit\n");
+  git(root, "add", "other.txt");
+  git(root, "commit", "-qm", "move head");
+  await expectCode(() => restarted.controlled.apply({ patch_task_id: submitted.taskId, confirmation: "APPLY" }),
+    "WORKSPACE_PRECONDITION_FAILED");
+
+  // Reset to the submitted base on a clean worktree: APPLY applies the retained diff.
+  git(root, "reset", "--hard", head);
+  const applied = await restarted.controlled.apply({ patch_task_id: submitted.taskId, confirmation: "APPLY" });
+  assert.deepEqual(applied.changed_paths, ["note.txt"]);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("A consistent submitted record restores with submitted provenance and no executor identity", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const taskId = "00000000-0000-4000-8000-000000000001";
+  const stateFilePath = retainedStateFile();
+  // retainedRecord(...) defaults to executor: "codex"; the explicit
+  // executor: undefined before source: "submitted" makes JSON serialization
+  // truly omit the executor field.
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [{
+      ...retainedRecord(taskId, root, head),
+      executor: undefined,
+      source: "submitted"
+    }]
+  });
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => { throw new Error("restored tasks must not execute"); }
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  assert.deepEqual(tasks.taskView(taskId), {
+    taskId,
+    state: "completed",
+    source: "submitted",
+    ready: true,
+    output: validPatch
+  });
+  assert.equal(tasks.taskView(taskId)?.executor, undefined);
+  // The restored submitted proposal stays usable through the existing APPLY flow.
+  const applied = await controlled.apply({ patch_task_id: taskId, confirmation: "APPLY" });
+  assert.equal(applied.applied, true);
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("quarantines submitted retained records that carry an executor identity or an unknown source", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+  const inconsistent: Array<Record<string, unknown>> = [
+    // source "submitted" must never also claim an executor.
+    { ...retainedRecord("00000000-0000-4000-8000-000000000001", root, head), source: "submitted" },
+    // any other source value is invalid retained state.
+    { ...retainedRecord("00000000-0000-4000-8000-000000000002", root, head), source: "generated" }
+  ];
+  for (const record of inconsistent) {
+    writeRetainedState(stateFilePath, {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [record]
+    });
+    const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+      execute: async () => ({ kind: "completed", output: validPatch })
+    }));
+    const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+    await controlled.load();
+    const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+    assert.equal(proposals.size, 0);
+    assert.equal(tasks.taskView(record.task_id as string), undefined);
+  }
+});
+
+test("interrupts a running generate_controlled_patch through control_task and finalizes as TASK_INTERRUPTED", async () => {
+  const root = repository();
+  let release!: (result: ExecutorResult) => void;
+  const pending = new Promise<ExecutorResult>((done) => { release = done; });
+  let interrupts = 0;
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: () => pending,
+    interrupt: async () => { interrupts += 1; release({ kind: "interrupted", output: "partial diff" }); }
+  }));
+  const controlled = new ControlledPatchService(registry, tasks);
+  const generated = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+
+  while (tasks.status(generated.taskId)?.state === "queued") {
+    await new Promise<void>((done) => setImmediate(done));
+  }
+  assert.equal(tasks.status(generated.taskId)?.state, "running");
+
+  const view = await tasks.controlTask(generated.taskId, "interrupt");
+  assert.equal(view.state, "running");
+  assert.equal(interrupts, 1);
+  await terminal(tasks, generated.taskId);
+
+  assert.deepEqual(tasks.result(generated.taskId), {
+    id: generated.taskId,
+    state: "failed",
+    error: { code: "TASK_INTERRUPTED", message: "The task was interrupted." },
+    partial_output: "partial diff"
+  });
+  // A failed generation removes its proposal, exactly like any other failure.
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.equal(proposals.has(generated.taskId), false);
+});
+
+test("interrupts a running refine_controlled_patch through control_task and finalizes as TASK_INTERRUPTED", async () => {
+  const root = repository();
+  const releases: Array<(result: ExecutorResult) => void> = [];
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: () => new Promise<ExecutorResult>((done) => { releases.push(done); }),
+    interrupt: async () => { releases[releases.length - 1]?.({ kind: "interrupted", output: "" }); }
+  }));
+  const controlled = new ControlledPatchService(registry, tasks);
+  const source = await controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  releases[0]?.({ kind: "completed", output: validPatch });
+  await terminal(tasks, source.taskId);
+
+  const refined = await controlled.refine({ patch_task_id: source.taskId, change_request: "improve wording" });
+  while (tasks.status(refined.taskId)?.state === "queued") {
+    await new Promise<void>((done) => setImmediate(done));
+  }
+  assert.equal(tasks.status(refined.taskId)?.state, "running");
+  await tasks.controlTask(refined.taskId, "interrupt");
+  await terminal(tasks, refined.taskId);
+
+  assert.deepEqual(tasks.result(refined.taskId), {
+    id: refined.taskId,
+    state: "failed",
+    error: { code: "TASK_INTERRUPTED", message: "The task was interrupted." }
+  });
+  const proposals = (controlled as unknown as { proposals: Map<string, unknown> }).proposals;
+  assert.equal(proposals.has(refined.taskId), false);
+  // The completed source proposal survives the interrupted refinement.
+  assert.equal(proposals.has(source.taskId), true);
+});
+
+test("steer on a running dsh generate task is unsupported; codex generate keeps the existing steer seam", async () => {
+  const root = repository();
+  const releases: Array<(result: ExecutorResult) => void> = [];
+  const steers: string[] = [];
+  const executorNames: string[] = [];
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, (executor) => {
+    executorNames.push(executor);
+    const execute = () => new Promise<ExecutorResult>((done) => { releases.push(done); });
+    return executor === "dsh"
+      ? { execute }
+      : { execute, steer: async (instruction) => { steers.push(instruction); } };
+  });
+  const controlled = new ControlledPatchService(registry, tasks);
+
+  const dsh = await controlled.generate({ workspace_id: "workspace", change_request: "change", executor: "dsh" });
+  while (tasks.status(dsh.taskId)?.state === "queued") {
+    await new Promise<void>((done) => setImmediate(done));
+  }
+  await expectCode(() => tasks.controlTask(dsh.taskId, "steer", "keep going"), "UNSUPPORTED_ACTION");
+  releases[0]?.({ kind: "completed", output: validPatch });
+  await terminal(tasks, dsh.taskId);
+
+  const codex = await controlled.generate({ workspace_id: "workspace", change_request: "change" });
+  while (tasks.status(codex.taskId)?.state === "queued") {
+    await new Promise<void>((done) => setImmediate(done));
+  }
+  await tasks.controlTask(codex.taskId, "steer", "keep going");
+  assert.deepEqual(steers, ["keep going"]);
+  releases[1]?.({ kind: "completed", output: validPatch });
+  await terminal(tasks, codex.taskId);
+
+  assert.deepEqual(executorNames, ["dsh", "codex"]);
 });

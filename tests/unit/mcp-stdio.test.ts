@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,6 +49,7 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       "generate_controlled_patch",
       "refine_controlled_patch",
       "run_task",
+      "submit_controlled_patch",
       "task_result"
     ]);
 
@@ -564,6 +566,96 @@ test("generate_controlled_patch and refine_controlled_patch accept omitted/codex
     });
     assert.equal(unknownRefine.isError, true);
     assert.equal(JSON.stringify(unknownRefine.body).includes("INVALID_STATE_TRANSITION"), false);
+  } finally {
+    await client.close();
+  }
+});
+
+test("submit_controlled_patch registers a submitted proposal and task_result reports source submitted without an executor", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-bridge-submit-")));
+  execFileSync("git", ["init", "-q"], { cwd: root });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: root });
+  execFileSync("git", ["config", "user.email", "test@example.invalid"], { cwd: root });
+  writeFileSync(join(root, "note.txt"), "before\n");
+  execFileSync("git", ["add", "note.txt"], { cwd: root });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: root });
+  const head = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const validPatch = `diff --git a/note.txt b/note.txt
+index 90be1f3..3b18e51 100644
+--- a/note.txt
++++ b/note.txt
+@@ -1 +1 @@
+-before
++after
+`;
+
+  const configDir = mkdtempSync(join(tmpdir(), "engineering-bridge-submit-config-"));
+  const configPath = join(configDir, "workspaces.json");
+  writeFileSync(configPath, `${JSON.stringify([{ id: "workspace", root, allow_write: true }], null, 2)}\n`);
+
+  const client = new Client({ name: "test-client", version: "1.0.0" });
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
+    cwd: process.cwd(),
+    stderr: "pipe"
+  });
+
+  const call = async (name: string, args: Record<string, unknown>): Promise<{ isError: boolean; body: Record<string, unknown> }> => {
+    const result = await client.callTool({ name, arguments: args });
+    const content = result.content as ToolResult["content"];
+    const text = content[0]?.text ?? "";
+    let body: unknown;
+    try {
+      body = JSON.parse(text) as unknown;
+    } catch {
+      body = { raw: text };
+    }
+    return { isError: result.isError === true, body: body as Record<string, unknown> };
+  };
+
+  try {
+    await client.connect(transport);
+
+    const submitted = await call("submit_controlled_patch", {
+      workspace_id: "workspace",
+      base_head: head,
+      diff: validPatch
+    });
+    assert.equal(submitted.isError, false);
+    const taskId = submitted.body.task_id;
+    assert.equal(typeof taskId, "string");
+    assert.equal(submitted.body.base_head, head);
+    if (typeof taskId !== "string") return;
+
+    const view = await call("task_result", { task_id: taskId });
+    assert.equal(view.body.state, "completed");
+    assert.equal(view.body.source, "submitted");
+    assert.equal("executor" in view.body, false);
+    assert.equal(view.body.output, validPatch);
+
+    // A stale base_head is rejected with the structured preflight error.
+    const stale = await call("submit_controlled_patch", {
+      workspace_id: "workspace",
+      base_head: "0".repeat(40),
+      diff: validPatch
+    });
+    assert.equal(stale.isError, true);
+    assert.deepEqual(stale.body, {
+      error: {
+        code: "WORKSPACE_PRECONDITION_FAILED",
+        message: "The workspace preconditions were not met."
+      }
+    });
+
+    // The submitted proposal is applied through the existing APPLY tool.
+    const applied = await call("apply_controlled_patch", {
+      patch_task_id: taskId,
+      confirmation: "APPLY"
+    });
+    assert.equal(applied.isError, false);
+    assert.deepEqual(applied.body, { patch_task_id: taskId, applied: true, changed_paths: ["note.txt"] });
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
   } finally {
     await client.close();
   }

@@ -29,7 +29,10 @@ type Proposal = {
   base: ProposalBase;
   state: "proposed" | "applying" | "applied";
   parentTaskId: Id | undefined;
-  executor: ExecutorName;
+  // Undefined only for caller-submitted proposals (persisted as
+  // source: "submitted"); executor-produced proposals always carry a real
+  // codex/dsh identity.
+  executor: ExecutorName | undefined;
   output: string | undefined;
 };
 
@@ -107,7 +110,13 @@ export class ControlledPatchService {
     for (const { taskId, output, ...proposal } of retainedState.proposals) {
       const restoredState = proposal.state === "applying" ? "proposed" : proposal.state;
       this.proposals.set(taskId, { ...proposal, state: restoredState, output });
-      this.tasks.restoreControlledPatchTask(taskId, output, restoredState !== "applied", proposal.executor);
+      this.tasks.restoreControlledPatchTask(
+        taskId,
+        output,
+        restoredState !== "applied",
+        proposal.executor,
+        proposal.executor === undefined ? "submitted" : undefined
+      );
     }
     this.appliedProposalTaskIds = retainedState.appliedTaskIds;
   }
@@ -138,6 +147,39 @@ export class ControlledPatchService {
       request.executor);
   }
 
+  async submit(request: { workspace_id: string; base_head: string; diff: string }): Promise<{ taskId: Id; baseHead: string | null }> {
+    // Submitting a caller-provided diff is read-only intake: like generation,
+    // it requires no write authorization and writes nothing. The diff must be
+    // a complete unified diff against exactly the current commit HEAD and must
+    // pass the same full controlled-patch preflight that APPLY runs.
+    const workspaceRoot = this.registry.resolve(request.workspace_id);
+    const base = await this.verifyWorkspace(workspaceRoot);
+    if (base.kind !== "commit" || base.head !== request.base_head) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    const output = normalizeTrailingLf(request.diff);
+    await this.preflightPatch(workspaceRoot, base, output);
+
+    const { taskId } = this.tasks.submitControlledPatchTask(output, true);
+    this.proposals.set(taskId, {
+      workspaceId: request.workspace_id,
+      workspaceRoot,
+      base,
+      state: "proposed",
+      parentTaskId: undefined,
+      executor: undefined,
+      output
+    });
+    try {
+      await this.persist();
+    } catch (error) {
+      this.proposals.delete(taskId);
+      this.tasks.unpinTask(taskId);
+      throw error;
+    }
+    return { taskId, baseHead: base.head };
+  }
+
   async apply(request: { patch_task_id: string; confirmation: string }): Promise<{
     patch_task_id: Id;
     applied: true;
@@ -161,28 +203,11 @@ export class ControlledPatchService {
     proposal.state = "applying";
     try {
       await this.persist();
-      const currentBase = await this.verifyWorkspace(proposal.workspaceRoot);
-      // Unborn proposals require the repository to still be unborn: if the user
-      // created the first commit meanwhile, this proposal must be rejected.
-      if (!sameBase(currentBase, proposal.base)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-      const targets = parsePatch(result.output);
-      for (const target of targets) {
-        if (proposal.base.kind === "unborn") {
-          // No tracked files exist in an unborn repository, so only pure
-          // additions are verifiable; modified targets cannot be checked.
-          if (target.kind !== "added") failPatch();
-        } else {
-          const entry = await this.git(proposal.workspaceRoot, ["ls-tree", proposal.base.head, "--", target.path]);
-          if (target.kind === "modified") {
-            if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) failPatch();
-            continue;
-          }
-          if (entry.length !== 0) failPatch();
-        }
-        const indexEntry = await this.git(proposal.workspaceRoot, ["ls-files", "--stage", "--", target.path]);
-        if (indexEntry.length !== 0 || await pathExists(resolve(proposal.workspaceRoot, target.path))) failPatch();
-      }
-      await this.git(proposal.workspaceRoot, ["apply", "--check", "--recount", "--unidiff-zero"], result.output);
+      // The full read-only preflight (workspace, HEAD/base, patch safety,
+      // target checks) runs again immediately before the write: APPLY must
+      // re-verify HEAD, workspace, patch safety, and write authorization even
+      // for proposals that already passed the preflight at submit time.
+      const targets = await this.preflightPatch(proposal.workspaceRoot, proposal.base, result.output);
       await this.git(proposal.workspaceRoot, ["apply", "--recount", "--unidiff-zero"], result.output);
       proposal.state = "applied";
       this.appliedProposalTaskIds.push(request.patch_task_id as Id);
@@ -197,6 +222,37 @@ export class ControlledPatchService {
       }
       throw error;
     }
+  }
+
+  // The shared read-only controlled-patch preflight used by submit (before a
+  // proposal is registered) and by APPLY (immediately before the write): the
+  // workspace must still match the proposal base, the patch must be
+  // structurally safe, every target must be verifiable against base HEAD /
+  // index / worktree, and `git apply --check` must accept the patch.
+  private async preflightPatch(workspaceRoot: string, base: ProposalBase, patch: string): Promise<PatchTarget[]> {
+    const currentBase = await this.verifyWorkspace(workspaceRoot);
+    // Unborn proposals require the repository to still be unborn: if the user
+    // created the first commit meanwhile, this proposal must be rejected.
+    if (!sameBase(currentBase, base)) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    const targets = parsePatch(patch);
+    for (const target of targets) {
+      if (base.kind === "unborn") {
+        // No tracked files exist in an unborn repository, so only pure
+        // additions are verifiable; modified targets cannot be checked.
+        if (target.kind !== "added") failPatch();
+      } else {
+        const entry = await this.git(workspaceRoot, ["ls-tree", base.head, "--", target.path]);
+        if (target.kind === "modified") {
+          if (!/^(100644|100755) blob [0-9a-f]+\t[^\n]+\n?$/u.test(entry)) failPatch();
+          continue;
+        }
+        if (entry.length !== 0) failPatch();
+      }
+      const indexEntry = await this.git(workspaceRoot, ["ls-files", "--stage", "--", target.path]);
+      if (indexEntry.length !== 0 || await pathExists(resolve(workspaceRoot, target.path))) failPatch();
+    }
+    await this.git(workspaceRoot, ["apply", "--check", "--recount", "--unidiff-zero"], patch);
+    return targets;
   }
 
   private startProposal(
@@ -266,7 +322,7 @@ export class ControlledPatchService {
         ...(proposal.base.kind === "unborn" ? { unborn: true } : {}),
         state: proposal.state,
         ...(proposal.parentTaskId === undefined ? {} : { parent_task_id: proposal.parentTaskId }),
-        executor: proposal.executor,
+        ...(proposal.executor === undefined ? { source: "submitted" } : { executor: proposal.executor }),
         output: proposal.output
       });
     }
@@ -492,6 +548,23 @@ function parseRetainedProposal(item: unknown): RetainedProposal | undefined {
   } catch {
     return undefined;
   }
+  // A caller-submitted proposal carries source: "submitted" and no executor
+  // identity: a submitted record that claims an executor is contradictory and
+  // is quarantined. Any other source value is invalid retained state.
+  if (item.source === "submitted") {
+    if (item.executor !== undefined) return undefined;
+    return {
+      taskId: item.task_id,
+      workspaceId: item.workspace_id,
+      workspaceRoot: item.workspace_root,
+      base,
+      state: item.state as Proposal["state"],
+      parentTaskId: item.parent_task_id as Id | undefined,
+      executor: undefined,
+      output: item.output
+    };
+  }
+  if (item.source !== undefined) return undefined;
   // The retained executor is honest state: records written before executor
   // selection default to codex, and anything else is quarantined rather than
   // silently downgraded (a "gemini" record must never claim codex semantics).

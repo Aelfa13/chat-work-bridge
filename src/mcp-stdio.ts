@@ -118,7 +118,9 @@ async function main(): Promise<void> {
   }, ({ task_id }) => {
     const view = service.taskView(task_id);
     if (view === undefined) return unknownTask();
-    return jsonContent({ task_id: view.taskId, state: view.state, executor: view.executor,
+    return jsonContent({ task_id: view.taskId, state: view.state,
+      ...(view.source === undefined ? {} : { source: view.source }),
+      ...(view.executor === undefined ? {} : { executor: view.executor }),
       ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
       ready: view.ready,
       ...(view.output === undefined ? {} : { output: view.output }),
@@ -214,6 +216,22 @@ async function main(): Promise<void> {
   }, async ({ patch_task_id, change_request, executor }) => {
     try {
       const proposal = await controlledPatches.refine({ patch_task_id, change_request, executor });
+      return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("submit_controlled_patch", {
+    description: "Submit a caller-provided complete unified Git diff as a read-only patch proposal against exactly the current commit HEAD. Nothing is written until the returned task is applied with exact APPLY; the proposal carries source: \"submitted\" and no executor identity.",
+    inputSchema: {
+      workspace_id: z.string().min(1),
+      base_head: z.string().min(1),
+      diff: z.string().min(1)
+    }
+  }, async ({ workspace_id, base_head, diff }) => {
+    try {
+      const proposal = await controlledPatches.submit({ workspace_id, base_head, diff });
       return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };

@@ -45,7 +45,12 @@ export interface ControlledTaskView {
   // reported honestly: a Codex task may additionally expose its real native
   // app-server thread id, while a DSH task never gets a fabricated session or
   // thread id (DSH headless currently has no machine-resumable session seam).
-  readonly executor: ExecutorName;
+  // A caller-submitted controlled patch has no executor at all: the view then
+  // reports only source: "submitted" and never a codex/dsh identity.
+  readonly executor?: ExecutorName | undefined;
+  // Present only for caller-submitted controlled patches: the proposal was
+  // provided by the caller, not produced by an executor.
+  readonly source?: "submitted" | undefined;
   readonly threadId?: string | undefined;
   readonly ready?: boolean;
   readonly output?: string | undefined;
@@ -55,27 +60,41 @@ export interface ControlledTaskView {
   readonly error?: SerializedError | undefined;
 }
 
+// While a legacy task is queued/running it temporarily retains its active
+// executor so control_task can reach the existing interrupt/steer seam; the
+// terminal record stores the result instead.
 type TaskRecord =
-  | { state: "queued" | "running"; executor: ExecutorName }
-  | { state: "completed" | "failed"; executor: ExecutorName; result: RegisteredWorkspaceTaskResult };
+  | { state: "queued" | "running"; executor: ExecutorName; active?: Executor }
+  | { state: "completed" | "failed"; executor: ExecutorName | undefined; source?: "submitted"; result: RegisteredWorkspaceTaskResult };
+
+type NonTerminalTaskRecord = Extract<TaskRecord, { state: "queued" | "running" }>;
+
+type InteractiveRecord = {
+  state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
+  executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
+  partialOutput?: string | undefined; error?: SerializedError | undefined;
+};
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
 
 export type TerminalTaskHandler = (result: RegisteredWorkspaceTaskResult) => void | Promise<void>;
 
-function interruptedError(executor: ExecutorName): SerializedError {
-  return serializeError(new CoreError(executor === "dsh" ? "DSH_EXECUTION_FAILED" : "CODEX_EXECUTION_FAILED"));
+// An interrupted run ends as TASK_INTERRUPTED: a stop is a task-level control
+// outcome, never an executor execution failure, and it must not masquerade as
+// DSH_EXECUTION_FAILED (or any other executor-specific code).
+function interruptedError(): SerializedError {
+  return serializeError(new CoreError("TASK_INTERRUPTED"));
 }
 
-// Interrupt keeps the failed terminal state and its existing safe error, and
+// Interrupt keeps the failed terminal state and its safe error, and
 // additionally retains the executor's genuine partial output. Empty partial
 // output (interrupt before anything was produced) is not fabricated: the field
 // is simply omitted.
-function interruptedTaskResult(taskId: Id, executor: ExecutorName, partialOutput: string): RegisteredWorkspaceTaskResult {
+function interruptedTaskResult(taskId: Id, partialOutput: string): RegisteredWorkspaceTaskResult {
   if (partialOutput === "") {
-    return { id: taskId, state: "failed", error: interruptedError(executor) };
+    return { id: taskId, state: "failed", error: interruptedError() };
   }
-  return { id: taskId, state: "failed", error: interruptedError(executor), partial_output: partialOutput };
+  return { id: taskId, state: "failed", error: interruptedError(), partial_output: partialOutput };
 }
 
 export class RegisteredWorkspaceTaskService {
@@ -109,15 +128,29 @@ export class RegisteredWorkspaceTaskService {
     this.trimLegacyTerminalTasks();
   }
 
-  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName = "codex"): void {
+  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName | undefined = "codex", source?: "submitted"): void {
     if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
       throw new CoreError("INTERNAL_ERROR");
     }
     const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
-    this.tasks.set(taskId, { state: "completed", executor, result });
+    const record: TaskRecord = {
+      state: "completed",
+      executor: source === "submitted" ? undefined : executor ?? "codex",
+      ...(source === undefined ? {} : { source }),
+      result
+    };
+    this.tasks.set(taskId, record);
     this.legacyTerminalTaskIds.push(taskId);
     if (pinned) this.pinnedTaskIds.add(taskId);
     this.trimLegacyTerminalTasks();
+  }
+
+  // Registers a caller-submitted controlled patch as a retained completed task
+  // with submitted provenance: no executor ran, so none is reported.
+  submitControlledPatchTask(output: string, pinned: boolean): { taskId: Id } {
+    const taskId = newId();
+    this.restoreControlledPatchTask(taskId, output, pinned, undefined, "submitted");
+    return { taskId };
   }
 
   status(taskId: unknown): { taskId: Id; state: RegisteredWorkspaceTaskState } | undefined {
@@ -149,13 +182,17 @@ export class RegisteredWorkspaceTaskService {
       if (!("result" in legacy)) {
         return { taskId, state: legacy.state, executor: legacy.executor, ready: false };
       }
+      const common = {
+        taskId,
+        state: legacy.result.state,
+        ...(legacy.executor === undefined ? {} : { executor: legacy.executor }),
+        ...(legacy.source === undefined ? {} : { source: legacy.source }),
+        ready: true
+      };
       return legacy.result.state === "completed"
-        ? { taskId, state: "completed", executor: legacy.executor, ready: true, output: legacy.result.output }
+        ? { ...common, output: legacy.result.output }
         : {
-          taskId,
-          state: "failed",
-          executor: legacy.executor,
-          ready: true,
+          ...common,
           error: legacy.result.error,
           ...(legacy.result.partial_output === undefined ? {} : { partial_output: legacy.result.partial_output })
         };
@@ -183,7 +220,18 @@ export class RegisteredWorkspaceTaskService {
   async controlTask(taskId: unknown, action: "continue" | "steer" | "interrupt" | "accept", instruction?: string): Promise<ControlledTaskView> {
     if (!isId(taskId)) throw new CoreError("INVALID_STATE_TRANSITION");
     const record = this.interactive.get(taskId);
-    if (!record) throw new CoreError("INVALID_STATE_TRANSITION");
+    if (record !== undefined) return this.controlInteractiveTask(taskId, record, action, instruction);
+    const legacy = this.tasks.get(taskId);
+    if (legacy === undefined || "result" in legacy) throw new CoreError("INVALID_STATE_TRANSITION");
+    return this.controlLegacyTask(taskId, legacy, action, instruction);
+  }
+
+  private async controlInteractiveTask(
+    taskId: Id,
+    record: InteractiveRecord,
+    action: "continue" | "steer" | "interrupt" | "accept",
+    instruction?: string
+  ): Promise<ControlledTaskView> {
     if (action === "accept") {
       if (record.state !== "waiting_for_supervisor_review") throw new CoreError("INVALID_STATE_TRANSITION");
       record.state = "completed";
@@ -195,6 +243,10 @@ export class RegisteredWorkspaceTaskService {
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
     } else if (action === "steer") {
+      // DSH headless has no steer seam: the action is unsupported for the
+      // executor type, not an invalid state transition. Codex steer behavior
+      // is unchanged.
+      if (record.request.executor === "dsh") throw new CoreError("UNSUPPORTED_ACTION");
       if (record.state !== "running" || !instruction?.trim() || !record.executor?.steer) throw new CoreError("INVALID_STATE_TRANSITION");
       await record.executor.steer(instruction);
     } else {
@@ -204,11 +256,30 @@ export class RegisteredWorkspaceTaskService {
     return this.taskView(taskId)!;
   }
 
-  private readonly interactive = new Map<Id, {
-    state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
-    executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
-    partialOutput?: string | undefined; error?: SerializedError | undefined;
-  }>();
+  private async controlLegacyTask(
+    taskId: Id,
+    record: NonTerminalTaskRecord,
+    action: "continue" | "steer" | "interrupt" | "accept",
+    instruction?: string
+  ): Promise<ControlledTaskView> {
+    if (action === "steer") {
+      // Same executor-type gate as the interactive path: DSH steer is
+      // unsupported, Codex keeps its existing seam.
+      if (record.executor === "dsh") throw new CoreError("UNSUPPORTED_ACTION");
+      const active = record.active;
+      if (record.state !== "running" || !instruction?.trim() || !active?.steer) throw new CoreError("INVALID_STATE_TRANSITION");
+      await active.steer(instruction);
+    } else if (action === "interrupt") {
+      const active = record.active;
+      if (record.state !== "running" || !active?.interrupt) throw new CoreError("INVALID_STATE_TRANSITION");
+      await active.interrupt();
+    } else {
+      throw new CoreError("INVALID_STATE_TRANSITION");
+    }
+    return this.taskView(taskId)!;
+  }
+
+  private readonly interactive = new Map<Id, InteractiveRecord>();
   private interactiveTerminalTaskIds: Id[] = [];
 
   private async executeInteractive(taskId: Id): Promise<void> {
@@ -233,7 +304,7 @@ export class RegisteredWorkspaceTaskService {
         record.partialOutput = result.output;
         record.output = undefined;
         record.state = "failed";
-        record.error = interruptedError(record.request.executor);
+        record.error = interruptedError();
       } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
@@ -254,6 +325,10 @@ export class RegisteredWorkspaceTaskService {
     try {
       const workspaceRoot = this.registry.resolve(request.workspace_id);
       const executor = this.executorFactory(request.executor, workspaceRoot);
+      // Temporarily retain the active executor on the running record so
+      // control_task can reach the existing interrupt/steer seam; the terminal
+      // record below replaces it once the run settles.
+      this.tasks.set(taskId, { state: "running", executor: request.executor, active: executor });
       const result = await executor.execute({ taskId, instruction: request.instruction });
       const taskResult: RegisteredWorkspaceTaskResult = result.kind === "completed"
         ? {
@@ -265,7 +340,7 @@ export class RegisteredWorkspaceTaskService {
         }
         : result.kind === "failed"
           ? { id: taskId, state: "failed", error: result.error }
-          : interruptedTaskResult(taskId, request.executor, result.output);
+          : interruptedTaskResult(taskId, result.output);
       await this.recordLegacyTerminalTask(taskId, taskResult, terminalTaskHandler);
     } catch (error) {
       const result: RegisteredWorkspaceTaskResult = {

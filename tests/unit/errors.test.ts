@@ -15,7 +15,9 @@ test("exposes the executor error codes", () => {
     "CODEX_EXECUTION_FAILED",
     "DSH_UNAVAILABLE",
     "DSH_PROTOCOL_ERROR",
-    "DSH_EXECUTION_FAILED"
+    "DSH_EXECUTION_FAILED",
+    "TASK_INTERRUPTED",
+    "UNSUPPORTED_ACTION"
   ]);
   assert.deepEqual(serializeError(new CoreError("CODEX_UNAVAILABLE")), {
     code: "CODEX_UNAVAILABLE", message: "Codex is unavailable."
@@ -34,6 +36,12 @@ test("exposes the executor error codes", () => {
   });
   assert.deepEqual(serializeError(new CoreError("DSH_EXECUTION_FAILED")), {
     code: "DSH_EXECUTION_FAILED", message: "DSH execution failed."
+  });
+  assert.deepEqual(serializeError(new CoreError("TASK_INTERRUPTED")), {
+    code: "TASK_INTERRUPTED", message: "The task was interrupted."
+  });
+  assert.deepEqual(serializeError(new CoreError("UNSUPPORTED_ACTION")), {
+    code: "UNSUPPORTED_ACTION", message: "The requested action is not supported."
   });
   assert.deepEqual(serializeError(new CoreError("UNKNOWN_WORKSPACE")), {
     code: "UNKNOWN_WORKSPACE", message: "The requested workspace is not registered."

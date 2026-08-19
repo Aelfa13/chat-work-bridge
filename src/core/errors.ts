@@ -9,7 +9,9 @@ export const ERROR_CODES = [
   "CODEX_EXECUTION_FAILED",
   "DSH_UNAVAILABLE",
   "DSH_PROTOCOL_ERROR",
-  "DSH_EXECUTION_FAILED"
+  "DSH_EXECUTION_FAILED",
+  "TASK_INTERRUPTED",
+  "UNSUPPORTED_ACTION"
 ] as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[number];
@@ -30,7 +32,9 @@ const ERROR_MESSAGES: Readonly<Record<ErrorCode, string>> = {
   CODEX_EXECUTION_FAILED: "Codex execution failed.",
   DSH_UNAVAILABLE: "DSH is unavailable.",
   DSH_PROTOCOL_ERROR: "DSH returned an invalid response.",
-  DSH_EXECUTION_FAILED: "DSH execution failed."
+  DSH_EXECUTION_FAILED: "DSH execution failed.",
+  TASK_INTERRUPTED: "The task was interrupted.",
+  UNSUPPORTED_ACTION: "The requested action is not supported."
 };
 
 function isErrorCode(value: unknown): value is ErrorCode {
