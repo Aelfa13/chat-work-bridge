@@ -40,6 +40,9 @@ const ENVIRONMENT_ALLOWLIST = [
 ] as const;
 const MAX_OUTPUT_BYTES = 1_048_576;
 const TRUNCATION_MARKER = "[output truncated]";
+const TRUNCATION_SEPARATOR = `\n${TRUNCATION_MARKER}\n`;
+const HEAD_OUTPUT_BYTES = 768 * 1024;
+const TAIL_OUTPUT_BYTES = MAX_OUTPUT_BYTES - HEAD_OUTPUT_BYTES - Buffer.byteLength(TRUNCATION_SEPARATOR);
 // npm target of the official DSH package, derived from a dsh.cmd shim's
 // location so a Windows npm install can be launched through Node directly
 // (never through a shell carrying the user-controlled instruction).
@@ -68,6 +71,25 @@ function decodeTruncatedPrefix(chunks: readonly Buffer[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function decodeTruncatedTail(bytes: Buffer): string | undefined {
+  for (let drop = 0; drop <= 3; drop += 1) {
+    try {
+      return new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(drop));
+    } catch {
+      // Try the next later start to skip an incomplete leading code point.
+    }
+  }
+  return undefined;
+}
+
+function retainTail(current: Buffer, chunk: Buffer): Buffer {
+  if (chunk.length >= TAIL_OUTPUT_BYTES) {
+    return Buffer.from(chunk.subarray(chunk.length - TAIL_OUTPUT_BYTES));
+  }
+  const keepFromCurrent = Math.min(current.length, TAIL_OUTPUT_BYTES - chunk.length);
+  return Buffer.concat([current.subarray(current.length - keepFromCurrent), chunk], keepFromCurrent + chunk.length);
 }
 
 function environment(host: Readonly<NodeJS.ProcessEnv>): NodeJS.ProcessEnv {
@@ -173,6 +195,7 @@ export class DshExecutor implements Executor {
       const chunks: Buffer[] = [];
       let bytes = 0;
       let truncated = false;
+      let tail = Buffer.alloc(0);
       let settled = false;
       let directExited = false;
       let deadlineTimer: NodeJS.Timeout | undefined;
@@ -228,15 +251,18 @@ export class DshExecutor implements Executor {
       child.stderr.on("error", () => stop(failure("DSH_EXECUTION_FAILED")));
       child.stderr.resume();
       child.stdout.on("data", (chunk: Buffer) => {
-        if (truncated) return;
+        if (truncated) {
+          // Keep consuming every chunk so the child can exit naturally, while
+          // retaining only the fixed-size suffix needed for completed output.
+          tail = retainTail(tail, chunk);
+          return;
+        }
         const remaining = MAX_OUTPUT_BYTES - bytes;
         if (chunk.length > remaining) {
-          // Only the first MAX_OUTPUT_BYTES are retained. Keep draining stdout
-          // so DSH can run to completion and exit on its own; never kill it
-          // for producing too much output.
           truncated = true;
           if (remaining > 0) chunks.push(chunk.subarray(0, remaining));
           bytes = MAX_OUTPUT_BYTES;
+          tail = retainTail(Buffer.concat(chunks), chunk.subarray(remaining));
           return;
         }
         bytes += chunk.length;
@@ -260,7 +286,7 @@ export class DshExecutor implements Executor {
           finish(failure("DSH_EXECUTION_FAILED"));
           return;
         }
-        finish(this.completedResult(chunks, bytes, truncated));
+        finish(this.completedResult(chunks, bytes, truncated, tail));
       };
       child.on("exit", (code) => {
         // `close` waits for every inherited stdio handle. A descendant can keep
@@ -271,7 +297,7 @@ export class DshExecutor implements Executor {
           exitImmediate = undefined;
           if (signalProcessGroup(child, this.platform, "SIGTERM")) {
             terminationResult = code === 0
-              ? this.completedResult(chunks, bytes, truncated)
+              ? this.completedResult(chunks, bytes, truncated, tail)
               : failure("DSH_EXECUTION_FAILED");
             if (killTimer === undefined) killTimer = setTimeout(forceKill, this.timing.killGraceMs);
             return;
@@ -290,13 +316,14 @@ export class DshExecutor implements Executor {
     active.beginInterrupt();
   }
 
-  private completedResult(chunks: readonly Buffer[], bytes: number, truncated: boolean): ExecutorResult {
+  private completedResult(chunks: readonly Buffer[], bytes: number, truncated: boolean, tail: Buffer): ExecutorResult {
     if (bytes === 0) return { kind: "completed", output: "" };
     if (truncated) {
-      const prefix = decodeTruncatedPrefix(chunks);
-      return prefix === undefined
+      const prefix = decodeTruncatedPrefix([Buffer.concat(chunks).subarray(0, HEAD_OUTPUT_BYTES)]);
+      const suffix = decodeTruncatedTail(tail);
+      return prefix === undefined || suffix === undefined
         ? failure("DSH_PROTOCOL_ERROR")
-        : { kind: "completed", output: `${prefix}\n${TRUNCATION_MARKER}` };
+        : { kind: "completed", output: `${prefix}${TRUNCATION_SEPARATOR}${suffix}` };
     }
     try {
       const output = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));

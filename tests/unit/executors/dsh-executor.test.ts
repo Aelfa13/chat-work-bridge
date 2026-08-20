@@ -19,6 +19,9 @@ const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
 const MAX_OUTPUT_BYTES = 1_048_576;
 const TRUNCATION_MARKER = "[output truncated]";
+const TRUNCATION_SEPARATOR = `\n${TRUNCATION_MARKER}\n`;
+const HEAD_OUTPUT_BYTES = 768 * 1024;
+const TAIL_OUTPUT_BYTES = MAX_OUTPUT_BYTES - HEAD_OUTPUT_BYTES - Buffer.byteLength(TRUNCATION_SEPARATOR);
 const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10 };
 
 interface Invocation {
@@ -449,17 +452,31 @@ test("treats exactly 1 MiB of output as within the cap", async () => {
   assert.equal(result.output.includes(TRUNCATION_MARKER), false);
 });
 
-test("truncates only once output exceeds 1 MiB, keeps the first 1 MiB, and marks the truncation", async () => {
+test("retains head and true tail within the 1 MiB budget while omitting the middle", async () => {
+  const headSentinel = "HEAD-SENTINEL";
+  const middleSentinel = "MIDDLE-SENTINEL";
+  const tailSentinel = "TAIL-SENTINEL";
+  const stdout = Buffer.concat([
+    Buffer.from(headSentinel),
+    Buffer.alloc(HEAD_OUTPUT_BYTES - Buffer.byteLength(headSentinel), 0x68),
+    Buffer.from(middleSentinel),
+    Buffer.alloc(64, 0x6d),
+    Buffer.alloc(TAIL_OUTPUT_BYTES - Buffer.byteLength(tailSentinel), 0x74),
+    Buffer.from(tailSentinel)
+  ]);
   const result = await new DshExecutor(
     TRUSTED_CWD,
-    fakeStarter({ stdout: Buffer.alloc(MAX_OUTPUT_BYTES + 1, 0x61) }, []),
+    fakeStarter({ stdout }, []),
     {}
   ).execute({ taskId: TASK_ID, instruction: "inspect" });
 
-  assert.deepEqual(result, {
-    kind: "completed",
-    output: `${"a".repeat(MAX_OUTPUT_BYTES)}\n${TRUNCATION_MARKER}`
-  });
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") return;
+  assert.equal(result.output.startsWith(headSentinel), true);
+  assert.equal(result.output.includes(middleSentinel), false);
+  assert.equal(result.output.endsWith(tailSentinel), true);
+  assert.equal(result.output.split(TRUNCATION_MARKER).length - 1, 1);
+  assert.equal(Buffer.byteLength(result.output), MAX_OUTPUT_BYTES);
 });
 
 test("keeps draining and waits for the natural close after the output cap is exceeded", async () => {
@@ -472,9 +489,10 @@ test("keeps draining and waits for the natural close after the output cap is exc
   await new Promise<void>((resolve) => setImmediate(resolve));
   const invocation = invocations[0];
   assert.ok(invocation);
-  invocation.write("a".repeat(MAX_OUTPUT_BYTES - 1));
-  invocation.write("b");
-  invocation.write("c".repeat(64));
+  invocation.write("a".repeat(MAX_OUTPUT_BYTES));
+  invocation.write("obsolete-tail".repeat(32_000));
+  invocation.write("z".repeat(TAIL_OUTPUT_BYTES - 10));
+  invocation.write("FINAL-TAIL");
   await new Promise<void>((resolve) => setImmediate(resolve));
 
   // The child is still running: nothing is settled early and it is never killed.
@@ -485,30 +503,36 @@ test("keeps draining and waits for the natural close after the output cap is exc
   const result = await pending;
 
   assert.equal(settled, true);
-  assert.deepEqual(result, {
-    kind: "completed",
-    output: `${"a".repeat(MAX_OUTPUT_BYTES - 1)}b\n${TRUNCATION_MARKER}`
-  });
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") return;
+  assert.equal(result.output.includes("obsolete-tail"), false);
+  assert.equal(result.output.endsWith("FINAL-TAIL"), true);
+  assert.equal(result.output.split(TRUNCATION_MARKER).length - 1, 1);
+  assert.equal(Buffer.byteLength(result.output) <= MAX_OUTPUT_BYTES, true);
   assert.deepEqual(invocation.signals, []);
 });
 
-test("a truncation boundary cutting a multi-byte character still completes with a valid UTF-8 prefix", async () => {
-  const middle = Buffer.from("中"); // 3-byte UTF-8: E4 B8 AD
-  for (const cut of [1, 2]) {
-    const result = await new DshExecutor(
-      TRUSTED_CWD,
-      fakeStarter({
-        stdout: Buffer.concat([Buffer.alloc(MAX_OUTPUT_BYTES - cut, 0x61), middle])
-      }, []),
-      {}
-    ).execute({ taskId: TASK_ID, instruction: "inspect" });
+test("repairs UTF-8 boundaries at both the retained head end and tail start", async () => {
+  const character = Buffer.from("中");
+  const stdout = Buffer.concat([
+    Buffer.alloc(HEAD_OUTPUT_BYTES - 1, 0x68),
+    character,
+    Buffer.alloc(64, 0x6d),
+    character,
+    Buffer.alloc(TAIL_OUTPUT_BYTES - 1, 0x74)
+  ]);
+  const result = await new DshExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ stdout }, []),
+    {}
+  ).execute({ taskId: TASK_ID, instruction: "inspect" });
 
-    assert.equal(result.kind, "completed");
-    if (result.kind !== "completed") return;
-    assert.equal(result.output, `${"a".repeat(MAX_OUTPUT_BYTES - cut)}\n${TRUNCATION_MARKER}`);
-    assert.doesNotThrow(() =>
-      new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(result.output)));
-  }
+  assert.equal(result.kind, "completed");
+  if (result.kind !== "completed") return;
+  assert.doesNotThrow(() =>
+    new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(result.output)));
+  assert.equal(result.output.includes(TRUNCATION_SEPARATOR), true);
+  assert.equal(Buffer.byteLength(result.output) <= MAX_OUTPUT_BYTES, true);
 });
 
 test("genuinely invalid UTF-8 before the truncation boundary is still a protocol error", async () => {
@@ -516,9 +540,9 @@ test("genuinely invalid UTF-8 before the truncation boundary is still a protocol
     TRUSTED_CWD,
     fakeStarter({
       stdout: Buffer.concat([
-        Buffer.from("a".repeat(MAX_OUTPUT_BYTES - 10)),
+        Buffer.from("a".repeat(HEAD_OUTPUT_BYTES - 10)),
         Buffer.from([0xff, 0xfe]),
-        Buffer.from("b".repeat(13))
+        Buffer.from("b".repeat(MAX_OUTPUT_BYTES))
       ])
     }, []),
     {}
