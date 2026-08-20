@@ -331,9 +331,8 @@ test("an interrupted interactive task without any partial output omits the field
   });
 });
 
-test("control_task interrupt reaches the DSH executor with SIGTERM", async () => {
+test("run_task interrupt reaches TASK_INTERRUPTED after bounded DSH TERM and KILL without close", async () => {
   const signals: string[] = [];
-  let emitClose: ((code: number | null) => void) | undefined;
   const service = new RegisteredWorkspaceTaskService(registry(), (executor, workspaceRoot) => {
     assert.equal(executor, "dsh");
     assert.equal(workspaceRoot, ROOT);
@@ -353,12 +352,11 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
           return true;
         }
       });
-      emitClose = (code) => {
-        stdout.end();
-        stderr.end();
-        child.emit("close", code, null);
-      };
       return child as unknown as ChildProcessWithoutNullStreams;
+    }, {}, process.platform, {
+      executionTimeoutMs: 100,
+      interruptGraceMs: 10,
+      killGraceMs: 10
     });
   });
   const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect", executor: "dsh" });
@@ -370,10 +368,10 @@ test("control_task interrupt reaches the DSH executor with SIGTERM", async () =>
   assert.equal(view.state, "running");
   assert.deepEqual(signals, ["SIGTERM"]);
 
-  emitClose?.(0);
   while (service.taskView(taskId)?.state === "queued" || service.taskView(taskId)?.state === "running") {
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
+  assert.deepEqual(signals, ["SIGTERM", "SIGKILL"]);
 
   assert.deepEqual(service.taskView(taskId), {
     taskId,

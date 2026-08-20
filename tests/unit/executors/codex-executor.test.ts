@@ -18,13 +18,18 @@ const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
 if (!isId(TASK_ID_VALUE)) throw new Error("Test task ID must be a UUID v4.");
 const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
+const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10 };
 
 interface Invocation {
   executable: string;
   args: readonly string[];
   options: SpawnOptionsWithoutStdio;
   stdin: string;
+  signals: string[];
   send(message: unknown): void;
+  error(): void;
+  exit(code: number | null): void;
+  close(code: number | null): void;
 }
 
 interface FakeBehavior {
@@ -35,6 +40,9 @@ interface FakeBehavior {
   exitCode?: number;
   processError?: boolean;
   autoComplete?: boolean;
+  hold?: boolean;
+  ignoredMethods?: readonly string[];
+  pid?: number;
 }
 
 function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): ProcessStarter {
@@ -43,8 +51,15 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
     const stdout = new PassThrough();
     const stderr = new PassThrough();
     const invocation: Invocation = {
-      executable, args: [...args], options, stdin: "",
-      send(message) { stdout.write(`${JSON.stringify(message)}\n`); }
+      executable, args: [...args], options, stdin: "", signals: [],
+      send(message) { stdout.write(`${JSON.stringify(message)}\n`); },
+      error() { child.emit("error", new Error("late child error")); },
+      exit(code) { child.emit("exit", code, null); },
+      close(code) {
+        stdout.end();
+        stderr.end();
+        child.emit("close", code, null);
+      }
     };
     const stdin = new Writable({
       write(chunk, _encoding, callback) {
@@ -52,6 +67,10 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
         if (behavior.appServerOutput !== undefined) {
           const message = JSON.parse(chunk.toString()) as { id?: number; method: string };
           if (message.id !== undefined) {
+            if (behavior.ignoredMethods?.includes(message.method)) {
+              callback();
+              return;
+            }
             let result: unknown = {};
             if (message.method === "thread/start") result = { thread: { id: "thread-1" } };
             if (message.method === "turn/start") result = { turn: { id: "turn-1" } };
@@ -69,10 +88,18 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
       }
     });
     invocations.push(invocation);
-    Object.assign(child, { stdin, stdout, stderr, killed: false, kill() { this.killed = true; return true; } });
+    Object.assign(child, {
+      stdin, stdout, stderr, killed: false, pid: behavior.pid,
+      kill(signal?: string) {
+        this.killed = true;
+        invocation.signals.push(signal ?? "SIGTERM");
+        return true;
+      }
+    });
 
     queueMicrotask(() => {
       if (behavior.appServerOutput !== undefined) return;
+      if (behavior.hold === true) return;
       if (behavior.processError === true) {
         child.emit("error", new Error("secret process error"));
         return;
@@ -83,6 +110,19 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
     });
     return child as unknown as ChildProcessWithoutNullStreams;
   };
+}
+
+function timedExecutor(starter: ProcessStarter, platform: NodeJS.Platform = process.platform): CodexExecutor {
+  return new CodexExecutor(TRUSTED_CWD, starter, {}, platform, SHORT_TIMING);
+}
+
+async function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("promise did not settle")), milliseconds);
+    })
+  ]);
 }
 
 test("uses the fixed safe invocation and returns agent text", async () => {
@@ -129,20 +169,19 @@ test("uses the fixed safe invocation and returns agent text", async () => {
   assert.equal(invocation.args.includes(instruction), false);
 });
 
-test("controls require turn/started readiness and reset between turns", async () => {
+test("steer requires turn/started readiness and controls reset between turns", async () => {
   const invocations: Invocation[] = [];
   const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ appServerOutput: "", autoComplete: false }, invocations), {});
 
   const firstExecution = executor.execute({ taskId: TASK_ID, instruction: "first" });
   await new Promise<void>((resolve) => setImmediate(resolve));
   await assert.rejects(executor.steer("too soon"), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
-  await assert.rejects(executor.interrupt(), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
   assert.equal(invocations[0]?.stdin.includes('"method":"turn/steer"'), false);
   assert.equal(invocations[0]?.stdin.includes('"method":"turn/interrupt"'), false);
 
   invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "other-turn", status: "inProgress" } } });
-  await assert.rejects(executor.interrupt(), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
-  assert.equal(invocations[0]?.stdin.includes('"method":"turn/interrupt"'), false);
+  await assert.rejects(executor.steer("wrong turn"), (error) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  assert.equal(invocations[0]?.stdin.includes('"method":"turn/steer"'), false);
 
   invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } } });
   await executor.steer("continue");
@@ -162,6 +201,131 @@ test("controls require turn/started readiness and reset between turns", async ()
   await secondExecution;
 });
 
+test("interrupt terminates Codex while initialize is still pending", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ hold: true }, invocations));
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await executor.interrupt();
+
+  assert.deepEqual(await settlesWithin(pending), { kind: "interrupted", output: "", evidence: [] });
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("interrupt forces termination when turn interrupt RPC never responds", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "",
+    autoComplete: false,
+    ignoredMethods: ["turn/interrupt"]
+  }, invocations));
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  await executor.interrupt();
+
+  assert.deepEqual(await settlesWithin(pending), {
+    kind: "interrupted",
+    output: "",
+    threadId: "thread-1",
+    evidence: []
+  });
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("cooperative Codex interrupt completion still terminates the one-shot app-server", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "",
+    autoComplete: false
+  }, invocations), "win32");
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  await executor.interrupt();
+  invocations[0]?.send({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } }
+  });
+
+  assert.equal((await settlesWithin(pending)).kind, "interrupted");
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("hard deadline terminates Codex when initialize never responds", async () => {
+  const invocations: Invocation[] = [];
+  const pending = timedExecutor(fakeStarter({ hold: true }, invocations))
+    .execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(await settlesWithin(pending), {
+    kind: "failed",
+    error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
+  });
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("direct child exit does not restart an existing TERM to KILL deadline", async () => {
+  const invocations: Invocation[] = [];
+  const originalKill = process.kill;
+  const signals: Array<{ signal: NodeJS.Signals | number | undefined; at: number }> = [];
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid !== -424243) throw new Error(`unexpected pid ${pid}`);
+    signals.push({ signal, at: Date.now() });
+    return true;
+  }) as typeof process.kill;
+  try {
+    const timing = { executionTimeoutMs: 1_000, interruptGraceMs: 10, killGraceMs: 80 };
+    const executor = new CodexExecutor(
+      TRUSTED_CWD,
+      fakeStarter({ appServerOutput: "", autoComplete: false, pid: 424243 }, invocations),
+      {},
+      "darwin",
+      timing
+    );
+    const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+    await executor.interrupt();
+    setTimeout(() => invocations[0]?.exit(0), 50);
+
+    await settlesWithin(pending, 120);
+    const term = signals.find(({ signal }) => signal === "SIGTERM");
+    const kill = signals.find(({ signal }) => signal === "SIGKILL");
+    assert.ok(term);
+    assert.ok(kill);
+    assert.ok(kill.at - term.at < 120, `kill deadline refreshed: ${kill.at - term.at}ms`);
+  } finally {
+    process.kill = originalKill;
+  }
+});
+
+test("normal Codex completion clears lifecycle work and ignores late process or RPC events", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ appServerOutput: "final answer" }, invocations));
+  let resolutions = 0;
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" })
+    .then((result) => { resolutions += 1; return result; });
+
+  const result = await pending;
+  const signals = [...(invocations[0]?.signals ?? [])];
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  invocations[0]?.send({ id: 999, result: {} });
+  invocations[0]?.exit(7);
+  invocations[0]?.close(7);
+  invocations[0]?.error();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(result.kind, "completed");
+  assert.equal(resolutions, 1);
+  assert.deepEqual(invocations[0]?.signals, signals);
+  assert.equal((executor as unknown as { pending: Map<number, unknown> }).pending.size, 0);
+  await assert.rejects(executor.interrupt(), (error) =>
+    error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+});
+
 test("maps a thrown spawn and a process error to unavailable", async () => {
   const throwing: ProcessStarter = () => { throw new Error("secret spawn details"); };
   const thrown = await new CodexExecutor(TRUSTED_CWD, throwing, {}).execute({ taskId: TASK_ID, instruction: "x" });
@@ -174,6 +338,24 @@ test("maps a thrown spawn and a process error to unavailable", async () => {
       error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable." }
     });
   }
+});
+
+test("direct child exit rejects initialize and clears every pending RPC even when stdio stays open", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(TRUSTED_CWD, fakeStarter({ hold: true }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  assert.equal((executor as unknown as { pending: Map<number, unknown> }).pending.size, 1);
+  invocation.exit(0);
+
+  assert.deepEqual(await settlesWithin(pending), {
+    kind: "failed",
+    error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
+  });
+  assert.equal((executor as unknown as { pending: Map<number, unknown> }).pending.size, 0);
 });
 
 test("rejects malformed JSONL, missing messages, and malformed message structure", async () => {

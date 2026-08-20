@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { spawn } from "node:child_process";
 import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 
 import { CoreError } from "../../../src/core/errors.js";
@@ -18,6 +19,7 @@ const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
 const MAX_OUTPUT_BYTES = 1_048_576;
 const TRUNCATION_MARKER = "[output truncated]";
+const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10 };
 
 interface Invocation {
   executable: string;
@@ -27,6 +29,8 @@ interface Invocation {
   signals: string[];
   killResult: boolean;
   write(chunk: string | Buffer): void;
+  error(): void;
+  exit(code: number | null): void;
   close(code: number | null): void;
 }
 
@@ -36,6 +40,7 @@ interface FakeBehavior {
   exitCode?: number;
   processError?: boolean;
   hold?: boolean;
+  pid?: number;
 }
 
 function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): DshProcessStarter {
@@ -54,6 +59,12 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): DshProc
       write(chunk) {
         stdout.write(chunk);
       },
+      error() {
+        child.emit("error", new Error("late child error"));
+      },
+      exit(code) {
+        child.emit("exit", code, null);
+      },
       close(code) {
         stdout.end();
         stderr.end();
@@ -64,6 +75,7 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): DshProc
       stdin,
       stdout,
       stderr,
+      pid: behavior.pid,
       killed: false,
       kill(signal?: string) {
         this.killed = true;
@@ -85,6 +97,23 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): DshProc
     });
     return child as unknown as ChildProcessWithoutNullStreams;
   };
+}
+
+function timedExecutor(
+  starter: DshProcessStarter,
+  platform: NodeJS.Platform = process.platform,
+  timing = SHORT_TIMING
+): DshExecutor {
+  return new DshExecutor(TRUSTED_CWD, starter, {}, platform, timing);
+}
+
+async function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error("promise did not settle")), milliseconds);
+    })
+  ]);
 }
 
 test("uses the official headless interface with a fixed workspace and returns final text", async () => {
@@ -195,6 +224,122 @@ test("maps a nonzero exit with empty stdout to an execution failure", async () =
     kind: "failed",
     error: { code: "DSH_EXECUTION_FAILED", message: "DSH execution failed." }
   });
+});
+
+test("direct child exit settles even when inherited stdout and stderr never close", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({ hold: true }, invocations), {});
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+  invocation.write("arrived output\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocation.exit(0);
+
+  assert.deepEqual(await settlesWithin(pending), { kind: "completed", output: "arrived output" });
+});
+
+test("POSIX direct exit terminates a descendant that keeps inherited stdio open", {
+  skip: process.platform === "win32"
+}, async () => {
+  let descendantPid: number | undefined;
+  let directStderr = "";
+  let directError = "";
+  const starter: DshProcessStarter = (_executable, _args, options) => {
+    const script = [
+      "const { spawn } = require('node:child_process');",
+      "process.stdin.resume();",
+      "const descendant = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] });",
+      "process.stdout.write(String(descendant.pid) + '\\n');",
+      "setTimeout(() => process.exit(0), 10);"
+    ].join("\n");
+    const child = spawn(process.execPath, ["-e", script], { ...options, cwd: process.cwd() });
+    child.on("error", (error) => { directError = error.message; });
+    child.stdin.on("error", (error) => { directError = `stdin: ${error.message}`; });
+    child.stderr.on("data", (chunk: Buffer) => { directStderr += chunk.toString("utf8"); });
+    child.stdout.once("data", (chunk: Buffer) => {
+      descendantPid = Number.parseInt(chunk.toString("utf8"), 10);
+    });
+    return child;
+  };
+  const executor = timedExecutor(starter, process.platform, {
+    executionTimeoutMs: 1_000,
+    interruptGraceMs: 20,
+    killGraceMs: 50
+  });
+
+  try {
+    const result = await settlesWithin(
+      executor.execute({ taskId: TASK_ID, instruction: "inspect" }),
+      500
+    );
+    if (result.kind !== "completed") {
+      throw new Error(JSON.stringify({ result, directStderr, directError }));
+    }
+    assert.ok(descendantPid);
+    assert.throws(() => process.kill(descendantPid!, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH");
+  } finally {
+    if (descendantPid !== undefined) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+    }
+  }
+});
+
+test("direct child exit never falls back to signalling its stale PID", async () => {
+  const invocations: Invocation[] = [];
+  const originalKill = process.kill;
+  process.kill = ((pid: number, signal?: NodeJS.Signals | number) => {
+    if (pid !== -424242) throw new Error(`unexpected pid ${pid}`);
+    if (signal === "SIGTERM") return true;
+    const error = new Error("process group exited") as NodeJS.ErrnoException;
+    error.code = "ESRCH";
+    throw error;
+  }) as typeof process.kill;
+  try {
+    const executor = timedExecutor(fakeStarter({ hold: true, pid: 424242 }, invocations), "darwin");
+    const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    invocations[0]?.exit(0);
+
+    assert.equal((await settlesWithin(pending)).kind, "completed");
+    assert.deepEqual(invocations[0]?.signals, []);
+  } finally {
+    process.kill = originalKill;
+  }
+});
+
+test("hard deadline terminates a silent DSH child and settles without close", async () => {
+  const invocations: Invocation[] = [];
+  const pending = timedExecutor(fakeStarter({ hold: true }, invocations))
+    .execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.deepEqual(await settlesWithin(pending), {
+    kind: "failed",
+    error: { code: "DSH_EXECUTION_FAILED", message: "DSH execution failed." }
+  });
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("normal DSH completion clears the deadline and ignores late exit close and error", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ stdout: "final answer\n" }, invocations));
+  let resolutions = 0;
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" })
+    .then((result) => { resolutions += 1; return result; });
+
+  assert.deepEqual(await pending, { kind: "completed", output: "final answer" });
+  await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  invocations[0]?.exit(7);
+  invocations[0]?.close(7);
+  invocations[0]?.error();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.equal(resolutions, 1);
+  assert.deepEqual(invocations[0]?.signals, []);
+  await assert.rejects(executor.interrupt(), (error) =>
+    error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
 });
 
 test("maps invalid UTF-8 completed output to a protocol error", async () => {
@@ -405,6 +550,19 @@ test("sends SIGTERM to the running child and reports the cached partial output o
     error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
 });
 
+test("interrupt escalates to SIGKILL and settles when DSH never closes", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ hold: true }, invocations));
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.write("partial answer");
+  await executor.interrupt();
+
+  assert.deepEqual(await settlesWithin(pending), { kind: "interrupted", output: "partial answer" });
+  assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
 test("interrupt with a zero exit code still reports interrupted", async () => {
   const invocations: Invocation[] = [];
   const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({ hold: true }, invocations), {});
@@ -445,22 +603,19 @@ test("repeated interrupt is idempotent and sends a single SIGTERM", async () => 
   assert.deepEqual(await pending, { kind: "interrupted", output: "" });
 });
 
-test("a failed kill never mislabels the execution as interrupted", async () => {
+test("a failed TERM request still settles as interrupted after the bounded KILL attempt", async () => {
   const invocations: Invocation[] = [];
-  const executor = new DshExecutor(TRUSTED_CWD, fakeStarter({ hold: true }, invocations), {});
+  const executor = timedExecutor(fakeStarter({ hold: true }, invocations));
   const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
 
   await new Promise<void>((resolve) => setImmediate(resolve));
   const invocation = invocations[0];
   assert.ok(invocation);
   invocation.killResult = false;
-  await assert.rejects(executor.interrupt(), (error) =>
-    error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION");
+  await executor.interrupt();
 
-  // The child kept running and its natural close settles the execution normally.
-  invocation.write("final answer");
-  invocation.close(0);
-  assert.deepEqual(await pending, { kind: "completed", output: "final answer" });
+  assert.deepEqual(await settlesWithin(pending), { kind: "interrupted", output: "" });
+  assert.deepEqual(invocation.signals, ["SIGTERM", "SIGKILL"]);
 });
 
 // ---------------------------------------------------------------------------

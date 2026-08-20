@@ -5,7 +5,15 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 
 import { CoreError, serializeError } from "../core/errors.js";
 import { resolveCommand } from "./command-resolution.js";
-import type { Executor, ExecutorRequest, ExecutorResult } from "./executor.js";
+import {
+  DEFAULT_EXECUTOR_TIMING,
+  signalExecution,
+  signalProcessGroup,
+  type Executor,
+  type ExecutorRequest,
+  type ExecutorResult,
+  type ExecutorTiming
+} from "./executor.js";
 
 export type DshProcessStarter = (
   executable: string,
@@ -38,8 +46,8 @@ const TRUNCATION_MARKER = "[output truncated]";
 const DSH_NODE_TARGET = ["@deepseek-ai", "dsh", "lib", "bin.js"] as const;
 
 interface ActiveExecution {
-  readonly child: ChildProcessWithoutNullStreams;
   interrupted: boolean;
+  beginInterrupt(): void;
 }
 
 function failure(code: "DSH_UNAVAILABLE" | "DSH_PROTOCOL_ERROR" | "DSH_EXECUTION_FAILED"): ExecutorResult {
@@ -121,7 +129,8 @@ export class DshExecutor implements Executor {
     private readonly workspaceRoot: string,
     private readonly startProcess: DshProcessStarter = spawn,
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
-    private readonly platform: NodeJS.Platform = process.platform
+    private readonly platform: NodeJS.Platform = process.platform,
+    private readonly timing: ExecutorTiming = DEFAULT_EXECUTOR_TIMING
   ) {}
 
   private invocation(): { executable: string; args: string[] } {
@@ -153,6 +162,7 @@ export class DshExecutor implements Executor {
         cwd: this.workspaceRoot,
         shell: false,
         stdio: ["pipe", "pipe", "pipe"],
+        detached: this.platform !== "win32",
         env: environment(this.hostEnvironment)
       });
     } catch {
@@ -164,18 +174,53 @@ export class DshExecutor implements Executor {
       let bytes = 0;
       let truncated = false;
       let settled = false;
-      const active: ActiveExecution = { child, interrupted: false };
-      this.active = active;
+      let directExited = false;
+      let deadlineTimer: NodeJS.Timeout | undefined;
+      let killTimer: NodeJS.Timeout | undefined;
+      let exitImmediate: NodeJS.Immediate | undefined;
+      let terminationResult: ExecutorResult | undefined;
+      let active!: ActiveExecution;
+      const currentTerminationResult = (): ExecutorResult =>
+        terminationResult?.kind === "interrupted"
+          ? { kind: "interrupted", output: new TextDecoder("utf-8").decode(Buffer.concat(chunks)) }
+          : terminationResult ?? failure("DSH_EXECUTION_FAILED");
       const finish = (result: ExecutorResult): void => {
         if (settled) return;
         settled = true;
+        if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+        if (killTimer !== undefined) clearTimeout(killTimer);
+        if (exitImmediate !== undefined) clearImmediate(exitImmediate);
         if (this.active === active) this.active = undefined;
+        child.stdin.destroy();
+        child.stdout.destroy();
+        child.stderr.destroy();
         resolveResult(result);
       };
       const stop = (result: ExecutorResult): void => {
-        if (!child.killed) child.kill();
+        if (settled) return;
+        signalExecution(child, this.platform, "SIGKILL");
         finish(result);
       };
+      const forceKill = (): void => {
+        signalExecution(child, this.platform, "SIGKILL", !directExited);
+        finish(currentTerminationResult());
+      };
+      const beginTermination = (result: ExecutorResult): void => {
+        if (settled || terminationResult !== undefined) return;
+        terminationResult = result;
+        signalExecution(child, this.platform, "SIGTERM");
+        killTimer = setTimeout(forceKill, this.timing.killGraceMs);
+      };
+      active = {
+        interrupted: false,
+        beginInterrupt: () => {
+          if (active.interrupted) return;
+          active.interrupted = true;
+          beginTermination({ kind: "interrupted", output: new TextDecoder("utf-8").decode(Buffer.concat(chunks)) });
+        }
+      };
+      this.active = active;
+      deadlineTimer = setTimeout(() => beginTermination(failure("DSH_EXECUTION_FAILED")), this.timing.executionTimeoutMs);
 
       child.on("error", () => stop(failure("DSH_UNAVAILABLE")));
       child.stdin.on("error", () => stop(failure("DSH_UNAVAILABLE")));
@@ -197,42 +242,44 @@ export class DshExecutor implements Executor {
         bytes += chunk.length;
         chunks.push(chunk);
       });
-      child.on("close", (code) => {
+      const finishFromExit = (code: number | null): void => {
         if (settled) return;
-        if (active.interrupted) {
-          // An interrupt was actually triggered with SIGTERM: report the cached
-          // partial stdout regardless of the exit code.
-          finish({ kind: "interrupted", output: new TextDecoder("utf-8").decode(Buffer.concat(chunks)) });
+        directExited = true;
+        if (terminationResult !== undefined) {
+          // If the direct child exited but its process group still exists, a
+          // descendant is alive. Keep the existing TERM->KILL bound; otherwise
+          // the requested termination is already complete.
+          if (signalProcessGroup(child, this.platform, "SIGTERM")) {
+            if (killTimer === undefined) killTimer = setTimeout(forceKill, this.timing.killGraceMs);
+          } else {
+            finish(currentTerminationResult());
+          }
           return;
         }
         if (code !== 0) {
           finish(failure("DSH_EXECUTION_FAILED"));
           return;
         }
-        if (bytes === 0) {
-          // The headless runner exits 0 whenever the final turn/end completed,
-          // even when the agent produced no non-empty assistant text. An empty
-          // stdout with exit 0 is therefore a legitimate empty completion, not
-          // a protocol error. Nonzero exits still fail above.
-          finish({ kind: "completed", output: "" });
-          return;
-        }
-        if (truncated) {
-          const prefix = decodeTruncatedPrefix(chunks);
-          finish(prefix === undefined
-            ? failure("DSH_PROTOCOL_ERROR")
-            : { kind: "completed", output: `${prefix}\n${TRUNCATION_MARKER}` });
-          return;
-        }
-        try {
-          const output = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
-          finish(output.endsWith("\n")
-            ? { kind: "completed", output: output.slice(0, -1) }
-            : { kind: "completed", output });
-        } catch {
-          finish(failure("DSH_PROTOCOL_ERROR"));
-        }
+        finish(this.completedResult(chunks, bytes, truncated));
+      };
+      child.on("exit", (code) => {
+        // `close` waits for every inherited stdio handle. A descendant can keep
+        // those pipes open after the direct DSH child has exited, so let data
+        // already queued for this turn drain once and then settle from `exit`.
+        directExited = true;
+        exitImmediate = setImmediate(() => {
+          exitImmediate = undefined;
+          if (signalProcessGroup(child, this.platform, "SIGTERM")) {
+            terminationResult = code === 0
+              ? this.completedResult(chunks, bytes, truncated)
+              : failure("DSH_EXECUTION_FAILED");
+            if (killTimer === undefined) killTimer = setTimeout(forceKill, this.timing.killGraceMs);
+            return;
+          }
+          finishFromExit(code);
+        });
       });
+      child.on("close", finishFromExit);
       child.stdin.end();
     });
   }
@@ -240,8 +287,24 @@ export class DshExecutor implements Executor {
   async interrupt(): Promise<void> {
     const active = this.active;
     if (active === undefined) throw new CoreError("INVALID_STATE_TRANSITION");
-    if (active.interrupted) return;
-    if (!active.child.kill("SIGTERM")) throw new CoreError("INVALID_STATE_TRANSITION");
-    active.interrupted = true;
+    active.beginInterrupt();
+  }
+
+  private completedResult(chunks: readonly Buffer[], bytes: number, truncated: boolean): ExecutorResult {
+    if (bytes === 0) return { kind: "completed", output: "" };
+    if (truncated) {
+      const prefix = decodeTruncatedPrefix(chunks);
+      return prefix === undefined
+        ? failure("DSH_PROTOCOL_ERROR")
+        : { kind: "completed", output: `${prefix}\n${TRUNCATION_MARKER}` };
+    }
+    try {
+      const output = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+      return output.endsWith("\n")
+        ? { kind: "completed", output: output.slice(0, -1) }
+        : { kind: "completed", output };
+    } catch {
+      return failure("DSH_PROTOCOL_ERROR");
+    }
   }
 }

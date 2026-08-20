@@ -1,3 +1,4 @@
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Id } from "../core/ids.js";
 import type { SerializedError } from "../core/errors.js";
 
@@ -28,4 +29,45 @@ export interface Executor {
   execute(request: ExecutorRequest): Promise<ExecutorResult>;
   steer?(instruction: string): Promise<void>;
   interrupt?(): Promise<void>;
+}
+
+export interface ExecutorTiming {
+  readonly executionTimeoutMs: number;
+  readonly interruptGraceMs: number;
+  readonly killGraceMs: number;
+}
+
+export const DEFAULT_EXECUTOR_TIMING: ExecutorTiming = {
+  executionTimeoutMs: 15 * 60_000,
+  interruptGraceMs: 5_000,
+  killGraceMs: 2_000
+};
+
+export function signalProcessGroup(
+  child: ChildProcessWithoutNullStreams,
+  platform: NodeJS.Platform,
+  signal: NodeJS.Signals
+): boolean {
+  if (platform === "win32" || child.pid === undefined) return false;
+  try {
+    process.kill(-child.pid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function signalExecution(
+  child: ChildProcessWithoutNullStreams,
+  platform: NodeJS.Platform,
+  signal: NodeJS.Signals,
+  directChildAlive = true
+): boolean {
+  if (signalProcessGroup(child, platform, signal)) return true;
+  if (!directChildAlive) return false;
+  try {
+    return child.kill(signal);
+  } catch {
+    return false;
+  }
 }

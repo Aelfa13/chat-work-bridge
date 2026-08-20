@@ -3,7 +3,16 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 import { CoreError, serializeError } from "../core/errors.js";
 import { VERSION } from "../version.js";
 import { resolveCommand } from "./command-resolution.js";
-import type { Executor, ExecutorEvidence, ExecutorRequest, ExecutorResult } from "./executor.js";
+import {
+  DEFAULT_EXECUTOR_TIMING,
+  signalExecution,
+  signalProcessGroup,
+  type Executor,
+  type ExecutorEvidence,
+  type ExecutorRequest,
+  type ExecutorResult,
+  type ExecutorTiming
+} from "./executor.js";
 
 export type ProcessStarter = (executable: string, args: readonly string[], options: SpawnOptionsWithoutStdio) => ChildProcessWithoutNullStreams;
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
@@ -57,10 +66,12 @@ export class CodexExecutor implements Executor {
   private startedTurnId: string | undefined;
   private nextId = 1;
   private pending = new Map<number, { resolve: (value: unknown) => void; reject: () => void }>();
+  private beginInterrupt: (() => void) | undefined;
 
   constructor(private readonly workspaceRoot: string, private readonly startProcess: ProcessStarter = spawn,
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
-    private readonly platform: NodeJS.Platform = process.platform) {}
+    private readonly platform: NodeJS.Platform = process.platform,
+    private readonly timing: ExecutorTiming = DEFAULT_EXECUTOR_TIMING) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     this.turnId = undefined;
@@ -68,7 +79,8 @@ export class CodexExecutor implements Executor {
     let child: ChildProcessWithoutNullStreams;
     try {
       const options: SpawnOptionsWithoutStdio = {
-        cwd: this.workspaceRoot, shell: false, stdio: ["pipe", "pipe", "pipe"], env: environment(this.hostEnvironment)
+        cwd: this.workspaceRoot, shell: false, stdio: ["pipe", "pipe", "pipe"],
+        detached: this.platform !== "win32", env: environment(this.hostEnvironment)
       };
       // Windows: a directly spawnable codex.exe is preferred; an npm-installed
       // codex.cmd shim is resolved to the official bin/codex.js Node target and
@@ -97,20 +109,57 @@ export class CodexExecutor implements Executor {
     let terminalPromise!: Promise<ExecutorResult>;
     terminalPromise = new Promise((resolve) => { terminal = resolve; });
     let settled = false;
+    let directExited = false;
+    let deadlineTimer: NodeJS.Timeout | undefined;
+    let interruptTimer: NodeJS.Timeout | undefined;
+    let killTimer: NodeJS.Timeout | undefined;
+    let exitImmediate: NodeJS.Immediate | undefined;
+    let terminationResult: ExecutorResult | undefined;
+    let killSignalled = false;
+    const rejectPending = (): void => {
+      for (const waiter of this.pending.values()) waiter.reject();
+      this.pending.clear();
+    };
     const finish = (result: ExecutorResult): void => {
       if (settled) return;
       settled = true;
-      for (const waiter of this.pending.values()) waiter.reject();
-      this.pending.clear();
-      terminal?.(result);
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (interruptTimer !== undefined) clearTimeout(interruptTimer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      if (exitImmediate !== undefined) clearImmediate(exitImmediate);
+      rejectPending();
       if (this.child === child) {
         this.child = undefined;
         this.turnId = undefined;
         this.startedTurnId = undefined;
+        this.beginInterrupt = undefined;
       }
-      if (!child.killed) child.kill();
+      // Every protocol terminal event ends this one-shot app-server, including
+      // a cooperative interrupt completion. Settling the Bridge task must not
+      // leave a detached process tree alive.
+      if (!killSignalled) {
+        if (directExited) {
+          signalProcessGroup(child, this.platform, "SIGTERM");
+          signalProcessGroup(child, this.platform, "SIGKILL");
+        } else {
+          signalExecution(child, this.platform, "SIGTERM");
+          signalExecution(child, this.platform, "SIGKILL");
+        }
+        killSignalled = true;
+      }
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+      terminal?.(result);
     };
-    const unavailable = (): void => finish(failure("CODEX_UNAVAILABLE"));
+    const stop = (result: ExecutorResult): void => {
+      if (settled) return;
+      terminationResult = result;
+      signalExecution(child, this.platform, "SIGKILL");
+      killSignalled = true;
+      finish(result);
+    };
+    const unavailable = (): void => stop(failure("CODEX_UNAVAILABLE"));
     // The evidence view a supervisor receives. Real evidence and the synthetic
     // evidence-drop marker together never exceed MAX_EVIDENCE: the marker only
     // appears once real entries were evicted, and the eviction loop above
@@ -127,6 +176,52 @@ export class CodexExecutor implements Executor {
           command: `${evidenceDropped} evidence item(s) dropped: evidence limit exceeded`
         }];
     };
+    const currentTerminationResult = (): ExecutorResult =>
+      terminationResult?.kind === "interrupted"
+        ? {
+          kind: "interrupted",
+          output,
+          ...(this.threadId === undefined ? {} : { threadId: this.threadId }),
+          evidence: visibleEvidence()
+        }
+        : terminationResult ?? failure("CODEX_EXECUTION_FAILED");
+    const forceKill = (): void => {
+      signalExecution(child, this.platform, "SIGKILL", !directExited);
+      killSignalled = true;
+      finish(currentTerminationResult());
+    };
+    const sendTerm = (): void => {
+      if (settled) return;
+      signalExecution(child, this.platform, "SIGTERM");
+      killTimer = setTimeout(forceKill, this.timing.killGraceMs);
+    };
+    const beginTermination = (result: ExecutorResult, cooperativeMs: number): void => {
+      if (settled || terminationResult !== undefined) return;
+      terminationResult = result;
+      if (cooperativeMs === 0) sendTerm();
+      else interruptTimer = setTimeout(sendTerm, cooperativeMs);
+    };
+    this.beginInterrupt = () => {
+      if (settled || terminationResult !== undefined) return;
+      const result: ExecutorResult = { kind: "interrupted", output, evidence: visibleEvidence() };
+      if (this.threadId !== undefined) Object.assign(result, { threadId: this.threadId });
+      if (this.threadId && this.startedTurnId) {
+        // The protocol request is best-effort. Its response is not the terminal
+        // signal, and its Promise must never hold control_task open.
+        void this.call("turn/interrupt", {
+          threadId: this.threadId,
+          turnId: this.startedTurnId
+        }).catch((): void => {});
+        beginTermination(result, this.timing.interruptGraceMs);
+      } else {
+        // initialize/thread-start/turn-start have no cooperative turn seam.
+        beginTermination(result, 0);
+      }
+    };
+    deadlineTimer = setTimeout(
+      () => beginTermination(failure("CODEX_EXECUTION_FAILED"), 0),
+      this.timing.executionTimeoutMs
+    );
     child.on("error", unavailable);
     child.stdin.on("error", unavailable);
     child.stdout.on("error", unavailable);
@@ -134,6 +229,7 @@ export class CodexExecutor implements Executor {
     child.stderr.resume();
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
+      if (settled) return;
       buffer += chunk;
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
@@ -200,11 +296,34 @@ export class CodexExecutor implements Executor {
         }
       }
     });
-    child.on("close", (code) => {
+    const finishFromExit = (code: number | null): void => {
       if (settled) return;
+      directExited = true;
+      // The app-server can no longer answer. Reject RPC callers immediately;
+      // descendant cleanup may continue for the bounded kill grace below.
+      rejectPending();
+      const result = terminationResult ?? (code === 0
+        ? failure("CODEX_PROTOCOL_ERROR")
+        : failure("CODEX_EXECUTION_FAILED"));
+      terminationResult = result;
+      if (signalProcessGroup(child, this.platform, "SIGTERM")) {
+        if (killTimer === undefined) killTimer = setTimeout(forceKill, this.timing.killGraceMs);
+        return;
+      }
       if (buffer.trim()) { try { JSON.parse(buffer); } catch { finish(failure("CODEX_PROTOCOL_ERROR")); return; } }
-      finish(code === 0 ? failure("CODEX_PROTOCOL_ERROR") : failure("CODEX_EXECUTION_FAILED"));
+      finish(currentTerminationResult());
+    };
+    child.on("exit", (code) => {
+      // `close` can be withheld indefinitely by descendants that inherited an
+      // app-server pipe. Drain already-delivered events once, then settle from
+      // the direct child's exit and reject every outstanding RPC.
+      directExited = true;
+      exitImmediate = setImmediate(() => {
+        exitImmediate = undefined;
+        finishFromExit(code);
+      });
     });
+    child.on("close", finishFromExit);
 
     try {
       await this.call("initialize", { clientInfo: { name: "engineering-bridge", version: VERSION } });
@@ -231,8 +350,8 @@ export class CodexExecutor implements Executor {
     await this.call("turn/steer", { threadId: this.threadId, expectedTurnId: this.startedTurnId, input: [{ type: "text", text: instruction }] });
   }
   async interrupt(): Promise<void> {
-    if (!this.threadId || !this.startedTurnId) throw new CoreError("INVALID_STATE_TRANSITION");
-    await this.call("turn/interrupt", { threadId: this.threadId, turnId: this.startedTurnId });
+    if (!this.child || !this.beginInterrupt) throw new CoreError("INVALID_STATE_TRANSITION");
+    this.beginInterrupt();
   }
   private call(method: string, params: unknown): Promise<unknown> {
     const id = this.nextId++;
