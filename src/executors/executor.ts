@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import type { Id } from "../core/ids.js";
 import type { SerializedError } from "../core/errors.js";
@@ -57,14 +58,46 @@ export function signalProcessGroup(
   }
 }
 
+export type WindowsTaskkill = (
+  file: string,
+  args: readonly string[],
+  options: {
+    readonly shell: false;
+    readonly stdio: "ignore";
+    readonly timeout: 1000;
+    readonly windowsHide: true;
+  }
+) => void;
+
+const defaultWindowsTaskkill: WindowsTaskkill = (file, args, options) => {
+  execFileSync(file, args, options);
+};
+
 export function signalExecution(
   child: ChildProcessWithoutNullStreams,
   platform: NodeJS.Platform,
   signal: NodeJS.Signals,
-  directChildAlive = true
+  directChildAlive = true,
+  windowsTaskkill: WindowsTaskkill = defaultWindowsTaskkill
 ): boolean {
   if (signalProcessGroup(child, platform, signal)) return true;
   if (!directChildAlive) return false;
+  if (platform === "win32") {
+    const pid = child.pid;
+    if (pid !== undefined && Number.isSafeInteger(pid) && pid > 0) {
+      try {
+        windowsTaskkill("taskkill", ["/PID", String(pid), "/T", "/F"], {
+          shell: false,
+          stdio: "ignore",
+          timeout: 1000,
+          windowsHide: true
+        });
+        return true;
+      } catch {
+        // Fall through to the existing direct-child signal path.
+      }
+    }
+  }
   try {
     return child.kill(signal);
   } catch {
