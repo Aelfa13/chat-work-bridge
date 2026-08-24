@@ -36,12 +36,14 @@ export interface ExecutorTiming {
   readonly executionTimeoutMs: number;
   readonly interruptGraceMs: number;
   readonly killGraceMs: number;
+  readonly protocolInactivityTimeoutMs?: number;
 }
 
 export const DEFAULT_EXECUTOR_TIMING: ExecutorTiming = {
   executionTimeoutMs: 15 * 60_000,
   interruptGraceMs: 5_000,
-  killGraceMs: 2_000
+  killGraceMs: 2_000,
+  protocolInactivityTimeoutMs: 2 * 60_000
 };
 
 export function signalProcessGroup(

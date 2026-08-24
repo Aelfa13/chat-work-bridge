@@ -27,7 +27,7 @@ const CODEX_NODE_TARGET = ["@openai", "codex", "bin", "codex.js"] as const;
 // entries that make list and count truncation visible.
 const TRUNCATION_MARKER = "[truncated]";
 
-function failure(code: "CODEX_UNAVAILABLE" | "CODEX_PROTOCOL_ERROR" | "CODEX_EXECUTION_FAILED"): ExecutorResult {
+function failure(code: "CODEX_UNAVAILABLE" | "CODEX_PROTOCOL_ERROR" | "CODEX_EXECUTION_FAILED" | "EXECUTOR_STALLED"): ExecutorResult {
   return { kind: "failed", error: serializeError(new CoreError(code)) };
 }
 function failedTurn(turn: Record<string, unknown>): ExecutorResult {
@@ -106,11 +106,12 @@ export class CodexExecutor implements Executor {
     let output = "";
     let buffer = "";
     let terminal: ((result: ExecutorResult) => void) | undefined;
-    let terminalPromise!: Promise<ExecutorResult>;
+    let terminalPromise: Promise<ExecutorResult>;
     terminalPromise = new Promise((resolve) => { terminal = resolve; });
     let settled = false;
     let directExited = false;
     let deadlineTimer: NodeJS.Timeout | undefined;
+    let inactivityTimer: NodeJS.Timeout | undefined;
     let interruptTimer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
     let exitImmediate: NodeJS.Immediate | undefined;
@@ -122,8 +123,12 @@ export class CodexExecutor implements Executor {
     };
     const finish = (result: ExecutorResult): void => {
       if (settled) return;
+      const finalResult = terminationResult?.kind === "interrupted"
+        ? { ...terminationResult, output, evidence: visibleEvidence() }
+        : terminationResult ?? result;
       settled = true;
       if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
       if (interruptTimer !== undefined) clearTimeout(interruptTimer);
       if (killTimer !== undefined) clearTimeout(killTimer);
       if (exitImmediate !== undefined) clearImmediate(exitImmediate);
@@ -150,7 +155,7 @@ export class CodexExecutor implements Executor {
       child.stdin.destroy();
       child.stdout.destroy();
       child.stderr.destroy();
-      terminal?.(result);
+      terminal?.(finalResult);
     };
     const stop = (result: ExecutorResult): void => {
       if (settled) return;
@@ -198,8 +203,29 @@ export class CodexExecutor implements Executor {
     const beginTermination = (result: ExecutorResult, cooperativeMs: number): void => {
       if (settled || terminationResult !== undefined) return;
       terminationResult = result;
+      if (inactivityTimer !== undefined) {
+        clearTimeout(inactivityTimer);
+        inactivityTimer = undefined;
+      }
       if (cooperativeMs === 0) sendTerm();
       else interruptTimer = setTimeout(sendTerm, cooperativeMs);
+    };
+    const startInactivityWatchdog = (): void => {
+      if (settled || terminationResult !== undefined) return;
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(
+        () => beginTermination(failure("EXECUTOR_STALLED"), 0),
+        this.timing.protocolInactivityTimeoutMs ?? DEFAULT_EXECUTOR_TIMING.protocolInactivityTimeoutMs ?? 2 * 60_000
+      );
+    };
+    const resetInactivityWatchdog = (): void => {
+      if (inactivityTimer !== undefined) startInactivityWatchdog();
+    };
+    const activeTurnActivity = (params: Record<string, unknown>): boolean => {
+      if (!this.startedTurnId) return false;
+      if (params.threadId !== undefined && params.threadId !== this.threadId) return false;
+      if (params.turnId !== undefined && params.turnId !== this.startedTurnId) return false;
+      return true;
     };
     this.beginInterrupt = () => {
       if (settled || terminationResult !== undefined) return;
@@ -246,10 +272,16 @@ export class CodexExecutor implements Executor {
         if (typeof message.method !== "string" || !object(message.params)) { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
         if (message.method === "turn/started") {
           const turn = object(message.params.turn) ? message.params.turn : message.params;
-          if (message.params.threadId === this.threadId && typeof turn.id === "string" && (!this.turnId || turn.id === this.turnId)) this.startedTurnId = turn.id;
+          if (message.params.threadId === this.threadId &&
+            typeof turn.id === "string" &&
+            (!this.turnId || turn.id === this.turnId)) {
+            this.startedTurnId = turn.id;
+            startInactivityWatchdog();
+          }
         }
         const item = object(message.params.item) ? message.params.item : undefined;
         if ((message.method === "item/started" || message.method === "item/completed") && item) {
+          if (activeTurnActivity(message.params)) resetInactivityWatchdog();
           if (item.type === "agentMessage") {
             if (message.method === "item/completed" && typeof item.text !== "string") { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
             if (typeof item.text === "string") output = item.text;
@@ -287,6 +319,9 @@ export class CodexExecutor implements Executor {
         }
         if (message.method === "turn/completed") {
           const turn = object(message.params.turn) ? message.params.turn : message.params;
+          if (message.params.threadId !== this.threadId ||
+            typeof turn.id !== "string" ||
+            turn.id !== (this.startedTurnId ?? this.turnId)) continue;
           const status = turn.status;
           const common = { threadId: this.threadId, evidence: visibleEvidence() };
           if (status === "failed") finish({ ...failedTurn(turn), ...common });
@@ -298,6 +333,7 @@ export class CodexExecutor implements Executor {
     });
     const finishFromExit = (code: number | null): void => {
       if (settled) return;
+      if (inactivityTimer !== undefined) clearTimeout(inactivityTimer);
       directExited = true;
       // The app-server can no longer answer. Reject RPC callers immediately;
       // descendant cleanup may continue for the bounded kill grace below.

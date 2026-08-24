@@ -18,7 +18,7 @@ const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
 if (!isId(TASK_ID_VALUE)) throw new Error("Test task ID must be a UUID v4.");
 const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
-const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10 };
+const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 25 };
 
 interface Invocation {
   executable: string;
@@ -77,6 +77,9 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
             queueMicrotask(() => {
               stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
               if (message.method === "turn/start" && behavior.autoComplete !== false) {
+                stdout.write(`${JSON.stringify({
+                  method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } }
+                })}\n`);
                 stdout.write(`${JSON.stringify({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: behavior.appServerOutput } } })}\n`);
                 const status = behavior.turnError ? "failed" : "completed";
                 stdout.write(`${JSON.stringify({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status, error: behavior.turnError } } })}\n`);
@@ -265,6 +268,110 @@ test("hard deadline terminates Codex when initialize never responds", async () =
     error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
   });
   assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("stalls after command items complete without turn/completed", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 1_000, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 25 }
+  );
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1", status: "inProgress" } } });
+  invocations[0]?.send({ method: "item/completed", params: { item: { id: "cmd-1", type: "commandExecution", status: "completed", command: "true" } } });
+
+  const result = await settlesWithin(pending, 200);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error.code, "EXECUTOR_STALLED");
+});
+
+test("matching item activity resets the inactivity watchdog", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 50 }
+  );
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  invocations[0]?.send({ method: "item/started", params: { item: { id: "cmd-1", type: "commandExecution" } } });
+  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  await executor.interrupt();
+  assert.equal((await pending).kind, "interrupted");
+});
+
+test("mismatched activity and RPC responses do not reset the inactivity watchdog", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 40 }
+  );
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  invocations[0]?.send({ method: "item/completed", params: { threadId: "other", turnId: "turn-1", item: { type: "commandExecution" } } });
+  invocations[0]?.send({ method: "item/completed", params: { threadId: "thread-1", turnId: "other", item: { type: "commandExecution" } } });
+  invocations[0]?.send({ id: 999, result: {} });
+  const result = await settlesWithin(pending, 200);
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error.code, "EXECUTOR_STALLED");
+});
+
+test("late turn completion cannot overwrite a stall termination", async () => {
+  const invocations: Invocation[] = [];
+  const executor = new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 30 }
+  );
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  await new Promise<void>((resolve) => setTimeout(resolve, 40));
+  invocations[0]?.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+  const result = await pending;
+  assert.equal(result.kind, "failed");
+  assert.equal(result.error.code, "EXECUTOR_STALLED");
+});
+
+test("normal completion and explicit interrupt preempt the inactivity watchdog", async () => {
+  const completedInvocations: Invocation[] = [];
+  const completed = await new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "done" }, completedInvocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 100 }
+  ).execute({ taskId: TASK_ID, instruction: "inspect" });
+  assert.equal(completed.kind, "completed");
+
+  const interruptedInvocations: Invocation[] = [];
+  const interruptedExecutor = new CodexExecutor(
+    TRUSTED_CWD,
+    fakeStarter({ appServerOutput: "", autoComplete: false }, interruptedInvocations),
+    {},
+    process.platform,
+    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 100 }
+  );
+  const pending = interruptedExecutor.execute({ taskId: TASK_ID, instruction: "inspect" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  interruptedInvocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+  await interruptedExecutor.interrupt();
+  assert.equal((await pending).kind, "interrupted");
 });
 
 test("direct child exit does not restart an existing TERM to KILL deadline", async () => {
