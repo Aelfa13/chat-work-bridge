@@ -145,6 +145,26 @@ export class RegisteredWorkspaceTaskService {
     this.trimLegacyTerminalTasks();
   }
 
+  restoreControlledPatchTaskFailure(
+    taskId: Id,
+    error: SerializedError,
+    executor: ExecutorName | undefined = "codex",
+    source?: "submitted"
+  ): void {
+    if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
+      throw new CoreError("INTERNAL_ERROR");
+    }
+    const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "failed", error };
+    this.tasks.set(taskId, {
+      state: "failed",
+      executor: source === "submitted" ? undefined : executor ?? "codex",
+      ...(source === undefined ? {} : { source }),
+      result
+    });
+    this.legacyTerminalTaskIds.push(taskId);
+    this.trimLegacyTerminalTasks();
+  }
+
   // Registers a caller-submitted controlled patch as a retained completed task
   // with submitted provenance: no executor ran, so none is reported.
   submitControlledPatchTask(output: string, pinned: boolean): { taskId: Id } {

@@ -4,6 +4,7 @@ import { lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/pr
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
+import { serializeError } from "../core/errors.js";
 import { isId } from "../core/ids.js";
 import type { Id } from "../core/ids.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
@@ -27,7 +28,7 @@ type Proposal = {
   workspaceId: string;
   workspaceRoot: string;
   base: ProposalBase;
-  state: "proposed" | "applying" | "applied";
+  state: "proposed" | "applying" | "applied" | "recovery_conflict";
   parentTaskId: Id | undefined;
   // Undefined only for caller-submitted proposals (persisted as
   // source: "submitted"); executor-produced proposals always carry a real
@@ -74,6 +75,7 @@ ${changeRequest}`;
 
 export class ControlledPatchService {
   private readonly proposals = new Map<Id, Proposal>();
+  private readonly applyQueues = new Map<string, Promise<void>>();
   private appliedProposalTaskIds: Id[] = [];
   private persistenceQueue: Promise<void> = Promise.resolve();
   private writeSequence = 0;
@@ -107,18 +109,45 @@ export class ControlledPatchService {
       throw new CoreError("INTERNAL_ERROR");
     }
 
+    const appliedProposalTaskIds = new Set(retainedState.appliedTaskIds);
+    let reconciledApplyingProposal = false;
     for (const { taskId, output, ...proposal } of retainedState.proposals) {
-      const restoredState = proposal.state === "applying" ? "proposed" : proposal.state;
+      let restoredState = proposal.state;
+      if (proposal.state === "applying") {
+        reconciledApplyingProposal = true;
+        if (await this.applyCheck(proposal.workspaceRoot, output, false)) {
+          restoredState = "proposed";
+          appliedProposalTaskIds.delete(taskId);
+        } else if (await this.applyCheck(proposal.workspaceRoot, output, true)) {
+          restoredState = "applied";
+          appliedProposalTaskIds.add(taskId);
+        } else {
+          restoredState = "recovery_conflict";
+          appliedProposalTaskIds.delete(taskId);
+        }
+      }
       this.proposals.set(taskId, { ...proposal, state: restoredState, output });
-      this.tasks.restoreControlledPatchTask(
-        taskId,
-        output,
-        restoredState !== "applied",
-        proposal.executor,
-        proposal.executor === undefined ? "submitted" : undefined
-      );
+      if (restoredState === "recovery_conflict") {
+        this.tasks.restoreControlledPatchTaskFailure(
+          taskId,
+          serializeError(new CoreError("APPLY_RECOVERY_CONFLICT")),
+          proposal.executor,
+          proposal.executor === undefined ? "submitted" : undefined
+        );
+      } else {
+        this.tasks.restoreControlledPatchTask(
+          taskId,
+          output,
+          restoredState !== "applied",
+          proposal.executor,
+          proposal.executor === undefined ? "submitted" : undefined
+        );
+      }
     }
-    this.appliedProposalTaskIds = retainedState.appliedTaskIds;
+    this.appliedProposalTaskIds = [...appliedProposalTaskIds];
+    if (reconciledApplyingProposal) {
+      await this.persist();
+    }
   }
 
   async generate(request: { workspace_id: string; change_request: string; executor?: ExecutorName }): Promise<{ taskId: Id; baseHead: string | null }> {
@@ -190,37 +219,70 @@ export class ControlledPatchService {
     if (proposal === undefined || proposal.state !== "proposed") {
       throw new CoreError("INVALID_STATE_TRANSITION");
     }
-    // APPLY is the single controlled-write authorization checkpoint: the
-    // workspace must currently hold controlled-write permission.
-    if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
-      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    }
-    const result = this.tasks.result(request.patch_task_id);
-    if (result === undefined || result.state !== "completed") {
-      throw new CoreError("INVALID_STATE_TRANSITION");
-    }
-
-    proposal.state = "applying";
-    try {
-      await this.persist();
-      // The full read-only preflight (workspace, HEAD/base, patch safety,
-      // target checks) runs again immediately before the write: APPLY must
-      // re-verify HEAD, workspace, patch safety, and write authorization even
-      // for proposals that already passed the preflight at submit time.
-      const targets = await this.preflightPatch(proposal.workspaceRoot, proposal.base, result.output);
-      await this.git(proposal.workspaceRoot, ["apply", "--recount", "--unidiff-zero"], result.output);
-      proposal.state = "applied";
-      this.appliedProposalTaskIds.push(request.patch_task_id as Id);
-      this.trimAppliedProposals();
-      this.tasks.unpinTask(request.patch_task_id as Id);
-      await this.persist();
-      return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
-    } catch (error) {
-      if (proposal.state === "applying") {
-        proposal.state = "proposed";
-        await this.persist();
+    return this.withApplyLock(proposal.workspaceRoot, async () => {
+      if (proposal.state !== "proposed") throw new CoreError("INVALID_STATE_TRANSITION");
+      if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       }
-      throw error;
+      const result = this.tasks.result(request.patch_task_id);
+      if (result === undefined || result.state !== "completed") {
+        throw new CoreError("INVALID_STATE_TRANSITION");
+      }
+
+      proposal.state = "applying";
+      try {
+        await this.persist();
+        const targets = await this.preflightPatch(proposal.workspaceRoot, proposal.base, result.output);
+        await this.git(proposal.workspaceRoot, ["apply", "--recount", "--unidiff-zero"], result.output);
+        proposal.state = "applied";
+        this.appliedProposalTaskIds.push(request.patch_task_id as Id);
+        this.trimAppliedProposals();
+        this.tasks.unpinTask(request.patch_task_id as Id);
+        try {
+          await this.persist();
+        } catch {
+          await this.persist();
+          return {
+            patch_task_id: request.patch_task_id as Id,
+            applied: true,
+            changed_paths: targets.map(({ path }) => path),
+            state: "applied",
+            metadata_recovered: true
+          };
+        }
+        return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
+      } catch (error) {
+        if (proposal.state === "applying") {
+          proposal.state = "proposed";
+          await this.persist();
+        }
+        throw error;
+      }
+    });
+  }
+
+  private withApplyLock<T>(workspaceRoot: string, action: () => Promise<T>): Promise<T> {
+    const previous = this.applyQueues.get(workspaceRoot) ?? Promise.resolve();
+    const current = previous.then(action, action);
+    const settled = current.then(() => undefined, () => undefined);
+    this.applyQueues.set(workspaceRoot, settled);
+    return current.finally(() => {
+      if (this.applyQueues.get(workspaceRoot) === settled) this.applyQueues.delete(workspaceRoot);
+    });
+  }
+
+  private async applyCheck(workspaceRoot: string, patch: string, reverse: boolean): Promise<boolean> {
+    try {
+      await this.git(workspaceRoot, [
+        "apply",
+        "--check",
+        "--recount",
+        "--unidiff-zero",
+        ...(reverse ? ["--reverse"] : [])
+      ], patch);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -537,7 +599,7 @@ function parseRetainedProposal(item: unknown): RetainedProposal | undefined {
       typeof item.workspace_id !== "string" || item.workspace_id.length === 0 ||
       typeof item.workspace_root !== "string" ||
       (item.unborn !== undefined && typeof item.unborn !== "boolean") ||
-      !["proposed", "applying", "applied"].includes(item.state as string) ||
+      !["proposed", "applying", "applied", "recovery_conflict"].includes(item.state as string) ||
       (item.parent_task_id !== undefined && !isId(item.parent_task_id)) ||
       typeof item.output !== "string") {
     return undefined;

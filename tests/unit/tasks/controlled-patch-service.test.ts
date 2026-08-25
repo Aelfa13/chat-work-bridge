@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -56,6 +56,48 @@ async function terminal(tasks: RegisteredWorkspaceTaskService, taskId: string): 
   while (["queued", "running"].includes(tasks.status(taskId)?.state ?? "")) {
     await new Promise<void>((done) => setImmediate(done));
   }
+}
+
+async function waitForOptionalFile(path: string, timeoutMs = 500): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      readFileSync(path);
+      return true;
+    } catch {
+      await new Promise<void>((done) => setTimeout(done, 5));
+    }
+  }
+  return false;
+}
+
+function gatedGitStarter(
+  enteredBase: string,
+  releaseBase: string,
+  calls: { apply: number }
+): GitStarter {
+  return (executable, args, options) => {
+    if (
+      executable === "git" &&
+      args.length === 3 &&
+      args[0] === "apply" &&
+      args[1] === "--recount" &&
+      args[2] === "--unidiff-zero"
+    ) {
+      calls.apply += 1;
+      const enteredPath = `${enteredBase}.${calls.apply}`;
+      const releasePath = `${releaseBase}.${calls.apply}`;
+      writeFileSync(enteredPath, "entered\n");
+      return spawn(process.execPath, [
+        "-e",
+        "const fs=require('node:fs');const cp=require('node:child_process');const [git,argsJson,release]=process.argv.slice(1);const deadline=Date.now()+2000;const wait=()=>{if(fs.existsSync(release)){const result=cp.spawnSync(git,JSON.parse(argsJson),{cwd:process.cwd(),stdio:'inherit',shell:false});process.exit(result.status===null||result.status===undefined?1:result.status);}if(Date.now()>=deadline)process.exit(1);setTimeout(wait,5)};wait();",
+        executable,
+        JSON.stringify(args),
+        releasePath
+      ], options);
+    }
+    return spawn(executable, args, options);
+  };
 }
 
 async function expectCode(action: () => Promise<unknown>, code: string): Promise<void> {
@@ -1957,4 +1999,207 @@ test("steer on a running dsh generate task is unsupported; codex generate keeps 
   await terminal(tasks, codex.taskId);
 
   assert.deepEqual(executorNames, ["dsh", "codex"]);
+});
+
+test("serializes concurrent APPLY calls for different proposals in one workspace", async () => {
+  const root = repository();
+  writeFileSync(join(root, "second.txt"), "before\n");
+  git(root, "add", "second.txt");
+  git(root, "commit", "-qm", "fixture");
+  const stateFilePath = retainedStateFile();
+  const enteredBase = `${stateFilePath}.entered`;
+  const releaseBase = `${stateFilePath}.release`;
+  const calls = { apply: 0 };
+  const secondPatch = `diff --git a/second.txt b/second.txt
+index 9d1c2f3..3b18e51 100644
+--- a/second.txt
++++ b/second.txt
+@@ -1 +1 @@
+-before
++after
+`;
+  let execution = 0;
+  const { controlled, tasks } = fixture(
+    root,
+    async () => ({ kind: "completed", output: execution++ === 0 ? validPatch : secondPatch }),
+    gatedGitStarter(enteredBase, releaseBase, calls),
+    stateFilePath
+  );
+  const first = await controlled.generate({ workspace_id: "workspace", change_request: "first change" });
+  await terminal(tasks, first.taskId);
+  const second = await controlled.generate({ workspace_id: "workspace", change_request: "second change" });
+  await terminal(tasks, second.taskId);
+
+  const firstEntered = `${enteredBase}.1`;
+  const firstRelease = `${releaseBase}.1`;
+  const secondEntered = `${enteredBase}.2`;
+  const secondRelease = `${releaseBase}.2`;
+  const releaseGate = (path: string): void => {
+    try {
+      writeFileSync(path, "release\n", { flag: "wx" });
+    } catch {
+      // The gate may already have been released.
+    }
+  };
+
+  try {
+    const firstApply = controlled.apply({ patch_task_id: first.taskId, confirmation: "APPLY" });
+    assert.equal(await waitForOptionalFile(firstEntered), true);
+    const secondApply = controlled.apply({ patch_task_id: second.taskId, confirmation: "APPLY" });
+    const secondEnteredBeforeRelease = await waitForOptionalFile(secondEntered);
+
+    releaseGate(firstRelease);
+    releaseGate(secondRelease);
+
+    const results = await Promise.allSettled([firstApply, secondApply]);
+    assert.equal(secondEnteredBeforeRelease, false);
+    assert.equal(results.filter(({ status }) => status === "fulfilled").length, 1);
+    assert.equal(results.filter(({ status }) => status === "rejected").length, 1);
+    assert.equal(
+      (results.find(({ status }) => status === "rejected") as PromiseRejectedResult).reason.code,
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+    assert.equal(readFileSync(join(root, "second.txt"), "utf8"), "before\n");
+  } finally {
+    releaseGate(firstRelease);
+    releaseGate(secondRelease);
+    rmSync(firstEntered, { force: true });
+    rmSync(firstRelease, { force: true });
+    rmSync(secondEntered, { force: true });
+    rmSync(secondRelease, { force: true });
+  }
+});
+
+test("reports metadata recovery when final persistence fails after APPLY executes", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const fixedNow = 1_700_000_000_000;
+  const collisionPath = `${stateFilePath}.${process.pid}.${fixedNow}.2.tmp`;
+  let armed = false;
+  const starter: GitStarter = (executable, args, options) => {
+    if (
+      armed &&
+      executable === "git" &&
+      args.length === 3 &&
+      args[0] === "apply" &&
+      args[1] === "--recount" &&
+      args[2] === "--unidiff-zero"
+    ) {
+      writeFileSync(collisionPath, "collision", { flag: "wx" });
+    }
+    return spawn(executable, args, options);
+  };
+  const current = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    starter,
+    stateFilePath
+  );
+  const generated = await current.controlled.generate({ workspace_id: "workspace", change_request: "change note" });
+  await terminal(current.tasks, generated.taskId);
+
+  const originalNow = Date.now;
+  Date.now = () => fixedNow;
+  armed = true;
+  try {
+    const base = await current.controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
+    const applied = base as typeof base & { state?: string; metadata_recovered?: boolean };
+    assert.equal(applied.state, "applied");
+    assert.equal(applied.metadata_recovered, true);
+  } finally {
+    Date.now = originalNow;
+    armed = false;
+    rmSync(collisionPath, { force: true });
+  }
+
+  assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+  const retained = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; state: string }>;
+  };
+  assert.equal(retained.proposals.find(({ task_id }) => task_id === generated.taskId)?.state, "applied");
+});
+
+test("recovers applying as proposed when the forward apply check succeeds", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const taskId = "00000000-0000-4000-8000-000000000001";
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [retainedRecord(taskId, root, head, { state: "applying" })]
+  });
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const retained = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; state: string }>;
+  };
+  assert.equal(retained.proposals.find(({ task_id }) => task_id === taskId)?.state, "proposed");
+  assert.equal(tasks.taskView(taskId)?.state, "completed");
+});
+
+test("recovers applying as applied when the forward check fails and reverse check succeeds", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const taskId = "00000000-0000-4000-8000-000000000001";
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [retainedRecord(taskId, root, head, { state: "applying" })]
+  });
+  writeFileSync(join(root, "note.txt"), "after\n");
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const retained = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; state: string }>;
+  };
+  assert.equal(retained.proposals.find(({ task_id }) => task_id === taskId)?.state, "applied");
+  assert.equal(tasks.taskView(taskId)?.state, "completed");
+  await expectCode(
+    () => controlled.apply({ patch_task_id: taskId, confirmation: "APPLY" }),
+    "INVALID_STATE_TRANSITION"
+  );
+});
+
+test("recovers applying as recovery_conflict when both apply directions fail and rejects APPLY", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const taskId = "00000000-0000-4000-8000-000000000001";
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [retainedRecord(taskId, root, head, { state: "applying" })]
+  });
+  writeFileSync(join(root, "note.txt"), "diverged\n");
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => ({ kind: "completed", output: validPatch })
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+  await controlled.load();
+
+  const retained = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+    proposals: Array<{ task_id: string; state: string }>;
+  };
+  assert.equal(retained.proposals.find(({ task_id }) => task_id === taskId)?.state, "recovery_conflict");
+  const conflictView = tasks.taskView(taskId);
+  assert.equal(conflictView?.state, "failed");
+  assert.equal(conflictView?.error?.code, "APPLY_RECOVERY_CONFLICT");
+  await expectCode(
+    () => controlled.apply({ patch_task_id: taskId, confirmation: "APPLY" }),
+    "INVALID_STATE_TRANSITION"
+  );
 });
