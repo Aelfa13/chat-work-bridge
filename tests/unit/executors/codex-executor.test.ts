@@ -246,7 +246,10 @@ test("rejects an unknown requested model before thread/start and turn/start", as
     model: "unknown-model"
   } as Parameters<typeof executor.execute>[0] & { model: string });
 
-  assert.equal(result.kind, "failed");
+  assert.deepEqual(result, {
+    kind: "failed",
+    error: { code: "UNSUPPORTED_ACTION", message: "The requested action is not supported." }
+  });
   assert.equal(invocations[0]!.stdin.includes('"method":"thread/start"'), false);
   assert.equal(invocations[0]!.stdin.includes('"method":"turn/start"'), false);
 });
@@ -270,7 +273,10 @@ test("rejects an unsupported reasoning effort before thread/start and turn/start
     reasoning_effort: "high"
   } as Parameters<typeof executor.execute>[0] & { model: string; reasoning_effort: string });
 
-  assert.equal(result.kind, "failed");
+  assert.deepEqual(result, {
+    kind: "failed",
+    error: { code: "UNSUPPORTED_ACTION", message: "The requested action is not supported." }
+  });
   assert.equal(invocations[0]!.stdin.includes('"method":"thread/start"'), false);
   assert.equal(invocations[0]!.stdin.includes('"method":"turn/start"'), false);
 });

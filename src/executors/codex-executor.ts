@@ -402,7 +402,11 @@ export class CodexExecutor implements Executor {
       if (!object(turnResult) || !object(turnResult.turn) || typeof turnResult.turn.id !== "string") throw new Error();
       this.turnId = turnResult.turn.id;
       if (this.startedTurnId !== this.turnId) this.startedTurnId = undefined;
-    } catch { if (!settled) finish(failure("CODEX_PROTOCOL_ERROR")); }
+    } catch (error) {
+      if (!settled) finish(error instanceof CoreError && error.code === "UNSUPPORTED_ACTION"
+        ? { kind: "failed", error: serializeError(error) }
+        : failure("CODEX_PROTOCOL_ERROR"));
+    }
     return terminalPromise;
   }
 
