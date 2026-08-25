@@ -53,6 +53,35 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       "task_result"
     ]);
 
+    const schemas = new Map(listed.tools.map((tool) => [tool.name, tool.inputSchema as {
+      properties?: Record<string, { type?: string; minLength?: number }>;
+    }]));
+    for (const name of ["run_task", "generate_controlled_patch", "refine_controlled_patch"]) {
+      const properties = schemas.get(name)?.properties;
+      assert.equal(properties?.model?.type, "string");
+      assert.equal(properties?.model?.minLength, 1);
+      assert.equal(properties?.reasoning_effort?.type, "string");
+      assert.equal(properties?.reasoning_effort?.minLength, 1);
+    }
+
+    for (const [name, argumentsValue] of [
+      ["run_task", { workspace_id: "missing", instruction: "inspect", executor: "dsh", model: "gpt-5-codex" }],
+      ["generate_controlled_patch", { workspace_id: "missing", change_request: "change", executor: "dsh", reasoning_effort: "high" }],
+      ["refine_controlled_patch", { patch_task_id: "missing", change_request: "refine", executor: "dsh", model: "gpt-5-codex" }]
+    ] as const) {
+      const rejected = await client.callTool({ name, arguments: argumentsValue });
+      assert.equal(rejected.isError, true);
+      const rejectedContent = rejected.content;
+      assert.ok(Array.isArray(rejectedContent));
+      if (!Array.isArray(rejectedContent)) continue;
+      const rejectedItem = rejectedContent[0];
+      assert.equal(rejectedItem?.type, "text");
+      if (rejectedItem?.type !== "text") continue;
+      assert.equal(JSON.parse(rejectedItem.text).error.code, "UNSUPPORTED_ACTION");
+      assert.equal(JSON.stringify(rejected).includes("UNKNOWN_WORKSPACE"), false);
+      assert.equal(JSON.stringify(rejected).includes("INVALID_STATE_TRANSITION"), false);
+    }
+
     const result = await client.callTool({
       name: "generate_controlled_patch",
       arguments: { workspace_id: "missing", change_request: "change nothing" }

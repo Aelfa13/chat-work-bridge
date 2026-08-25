@@ -364,6 +364,25 @@ export class CodexExecutor implements Executor {
     try {
       await this.call("initialize", { clientInfo: { name: "engineering-bridge", version: VERSION } });
       this.notify("initialized", {});
+      if (request.model !== undefined || request.reasoning_effort !== undefined) {
+        const modelResult = await this.call("model/list", {});
+        if (!object(modelResult) || !Array.isArray(modelResult.data)) throw new Error();
+        const models = modelResult.data.filter((entry): entry is Record<string, unknown> =>
+          object(entry) && typeof entry.model === "string"
+        );
+        const selected = request.model !== undefined
+          ? models.find((entry) => entry.model === request.model)
+          : models.find((entry) => entry.isDefault === true);
+        if (!selected) throw new CoreError("UNSUPPORTED_ACTION");
+        if (request.reasoning_effort !== undefined) {
+          const efforts = Array.isArray(selected.supportedReasoningEfforts)
+            ? selected.supportedReasoningEfforts
+            : [];
+          if (!efforts.some((effort) => object(effort) && effort.reasoningEffort === request.reasoning_effort)) {
+            throw new CoreError("UNSUPPORTED_ACTION");
+          }
+        }
+      }
       const sandbox = request.sandbox ?? "read-only";
       const threadParams: Record<string, unknown> = { cwd: this.workspaceRoot, approvalPolicy: "never", sandbox };
       if (request.threadId) threadParams.threadId = request.threadId;
@@ -373,7 +392,13 @@ export class CodexExecutor implements Executor {
       const sandboxPolicy = sandbox === "workspace-write"
         ? { type: "workspaceWrite", writableRoots: [this.workspaceRoot], networkAccess: false }
         : { type: "readOnly", networkAccess: false };
-      const turnResult = await this.call("turn/start", { threadId: this.threadId, input: [{ type: "text", text: request.instruction }], cwd: this.workspaceRoot, approvalPolicy: "never", sandboxPolicy });
+      const turnParams: Record<string, unknown> = {
+        threadId: this.threadId, input: [{ type: "text", text: request.instruction }],
+        cwd: this.workspaceRoot, approvalPolicy: "never", sandboxPolicy
+      };
+      if (request.model !== undefined) turnParams.model = request.model;
+      if (request.reasoning_effort !== undefined) turnParams.effort = request.reasoning_effort;
+      const turnResult = await this.call("turn/start", turnParams);
       if (!object(turnResult) || !object(turnResult.turn) || typeof turnResult.turn.id !== "string") throw new Error();
       this.turnId = turnResult.turn.id;
       if (this.startedTurnId !== this.turnId) this.startedTurnId = undefined;

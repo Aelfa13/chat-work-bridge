@@ -105,11 +105,22 @@ async function main(): Promise<void> {
     inputSchema: {
       workspace_id: z.string().min(1),
       instruction: z.string().min(1),
-      executor: z.enum(["codex", "dsh"]).optional().default("codex")
+      executor: z.enum(["codex", "dsh"]).optional().default("codex"),
+      model: z.string().min(1).optional(),
+      reasoning_effort: z.string().min(1).optional()
     }
-  }, ({ workspace_id, instruction, executor }) => {
-    const { taskId } = service.startTask({ workspace_id, instruction, executor });
-    return jsonContent({ task_id: taskId });
+  }, ({ workspace_id, instruction, executor, model, reasoning_effort }) => {
+    try {
+      if (executor === "dsh" && (model !== undefined || reasoning_effort !== undefined)) {
+        throw new CoreError("UNSUPPORTED_ACTION");
+      }
+      const { taskId } = service.startTask({ workspace_id, instruction, executor,
+        ...(model === undefined ? {} : { model }),
+        ...(reasoning_effort === undefined ? {} : { reasoning_effort }) });
+      return jsonContent({ task_id: taskId });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
   });
 
   server.registerTool("task_result", {
@@ -195,11 +206,18 @@ async function main(): Promise<void> {
     inputSchema: {
       workspace_id: z.string().min(1),
       change_request: z.string().min(1),
-      executor: z.enum(["codex", "dsh"]).optional().default("codex")
+      executor: z.enum(["codex", "dsh"]).optional().default("codex"),
+      model: z.string().min(1).optional(),
+      reasoning_effort: z.string().min(1).optional()
     }
-  }, async ({ workspace_id, change_request, executor }) => {
+  }, async ({ workspace_id, change_request, executor, model, reasoning_effort }) => {
     try {
-      const proposal = await controlledPatches.generate({ workspace_id, change_request, executor });
+      if (executor === "dsh" && (model !== undefined || reasoning_effort !== undefined)) {
+        throw new CoreError("UNSUPPORTED_ACTION");
+      }
+      const proposal = await controlledPatches.generate({ workspace_id, change_request, executor,
+        ...(model === undefined ? {} : { model }),
+        ...(reasoning_effort === undefined ? {} : { reasoning_effort }) });
       return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };
@@ -211,11 +229,18 @@ async function main(): Promise<void> {
     inputSchema: {
       patch_task_id: z.string().min(1),
       change_request: z.string().min(1),
-      executor: z.enum(["codex", "dsh"]).optional().default("codex")
+      executor: z.enum(["codex", "dsh"]).optional().default("codex"),
+      model: z.string().min(1).optional(),
+      reasoning_effort: z.string().min(1).optional()
     }
-  }, async ({ patch_task_id, change_request, executor }) => {
+  }, async ({ patch_task_id, change_request, executor, model, reasoning_effort }) => {
     try {
-      const proposal = await controlledPatches.refine({ patch_task_id, change_request, executor });
+      if (executor === "dsh" && (model !== undefined || reasoning_effort !== undefined)) {
+        throw new CoreError("UNSUPPORTED_ACTION");
+      }
+      const proposal = await controlledPatches.refine({ patch_task_id, change_request, executor,
+        ...(model === undefined ? {} : { model }),
+        ...(reasoning_effort === undefined ? {} : { reasoning_effort }) });
       return jsonContent({ task_id: proposal.taskId, base_head: proposal.baseHead });
     } catch (error) {
       return { isError: true, ...jsonContent({ error: serializeError(error) }) };

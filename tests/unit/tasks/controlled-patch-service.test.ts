@@ -6,7 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { CoreError } from "../../../src/core/errors.js";
-import type { Executor, ExecutorResult } from "../../../src/executors/executor.js";
+import type { Executor, ExecutorRequest, ExecutorResult } from "../../../src/executors/executor.js";
 import { ControlledPatchService } from "../../../src/tasks/controlled-patch-service.js";
 import type { GitStarter } from "../../../src/tasks/controlled-patch-service.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
@@ -190,6 +190,48 @@ test("restores a completed generated proposal for task_result after restart", as
     ready: true,
     output: validPatch
   });
+});
+
+test("forwards optional Codex selection fields for generate and refine", async () => {
+  const root = repository();
+  const requests: ExecutorRequest[] = [];
+  const first = fixture(root, async (request) => {
+    requests.push(request);
+    return { kind: "completed", output: validPatch };
+  });
+
+  const generated = await first.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note",
+    model: "gpt-5-codex",
+    reasoning_effort: "high"
+  } as Parameters<ControlledPatchService["generate"]>[0] & {
+    model: string;
+    reasoning_effort: string;
+  });
+  await terminal(first.tasks, generated.taskId);
+
+  const refined = await first.controlled.refine({
+    patch_task_id: generated.taskId,
+    change_request: "improve wording",
+    model: "gpt-5-codex",
+    reasoning_effort: "low"
+  } as Parameters<ControlledPatchService["refine"]>[0] & {
+    model: string;
+    reasoning_effort: string;
+  });
+  await terminal(first.tasks, refined.taskId);
+
+  assert.deepEqual(requests.map((request) => {
+    const selected = request as ExecutorRequest & { model?: string; reasoning_effort?: string };
+    return {
+      model: selected.model,
+      reasoning_effort: selected.reasoning_effort
+    };
+  }), [
+    { model: "gpt-5-codex", reasoning_effort: "high" },
+    { model: "gpt-5-codex", reasoning_effort: "low" }
+  ]);
 });
 
 test("refines a restored proposal with its parent relationship and original base HEAD retained", async () => {

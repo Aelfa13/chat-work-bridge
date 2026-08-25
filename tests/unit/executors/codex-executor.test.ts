@@ -35,6 +35,7 @@ interface Invocation {
 interface FakeBehavior {
   appServerOutput?: string;
   turnError?: { message: string; codexErrorInfo?: string; additionalDetails?: string };
+  modelList?: readonly { id: string; model: string; isDefault?: boolean; defaultReasoningEffort?: string; supportedReasoningEfforts?: readonly { reasoningEffort: string; description: string }[] }[];
   stdout?: string;
   stderr?: string;
   exitCode?: number;
@@ -72,6 +73,9 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
               return;
             }
             let result: unknown = {};
+            if (message.method === "model/list") {
+              result = { data: behavior.modelList ?? [] };
+            }
             if (message.method === "thread/start") result = { thread: { id: "thread-1" } };
             if (message.method === "turn/start") result = { turn: { id: "turn-1" } };
             queueMicrotask(() => {
@@ -170,6 +174,132 @@ test("uses the fixed safe invocation and returns agent text", async () => {
   assert.deepEqual(messages[2], { id: 2, method: "thread/start", params: { cwd: TRUSTED_CWD, approvalPolicy: "never", sandbox: "read-only" } });
   assert.deepEqual(messages[3], { id: 3, method: "turn/start", params: { threadId: "thread-1", input: [{ type: "text", text: instruction }], cwd: TRUSTED_CWD, approvalPolicy: "never", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
   assert.equal(invocation.args.includes(instruction), false);
+});
+
+test("preserves the default Codex JSON-RPC flow when model selection is omitted", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ appServerOutput: "done" }, invocations));
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  assert.equal(result.kind, "completed");
+  const messages = invocations[0]!.stdin.trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(messages.some((message: { method?: string }) => message.method === "model/list"), false);
+  const turnStart = messages.find((message: { method?: string }) => message.method === "turn/start");
+  assert.ok(turnStart);
+  assert.equal("model" in turnStart.params, false);
+  assert.equal("effort" in turnStart.params, false);
+});
+
+test("validates the requested model and effort before starting the normal Codex flow", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "done",
+    modelList: [{
+      id: "catalog-id",
+      model: "gpt-5-codex",
+      isDefault: true,
+      supportedReasoningEfforts: [
+        { reasoningEffort: "low", description: "Low" },
+        { reasoningEffort: "high", description: "High" }
+      ]
+    }]
+  }, invocations));
+
+  const result = await executor.execute({
+    taskId: TASK_ID,
+    instruction: "inspect",
+    model: "gpt-5-codex",
+    reasoning_effort: "high"
+  } as Parameters<typeof executor.execute>[0] & { model: string; reasoning_effort: string });
+
+  assert.equal(result.kind, "completed");
+  const messages = invocations[0]!.stdin.trim().split("\n").map((line) => JSON.parse(line));
+  const modelListIndex = messages.findIndex((message: { method?: string }) => message.method === "model/list");
+  const threadStartIndex = messages.findIndex((message: { method?: string }) => message.method === "thread/start");
+  const turnStartIndex = messages.findIndex((message: { method?: string }) => message.method === "turn/start");
+  assert.equal(modelListIndex >= 0, true);
+  assert.equal(modelListIndex < threadStartIndex, true);
+  assert.equal(threadStartIndex < turnStartIndex, true);
+  const turnStart = messages[turnStartIndex]!;
+  assert.deepEqual(
+    { model: turnStart.params.model, effort: turnStart.params.effort },
+    { model: "gpt-5-codex", effort: "high" }
+  );
+});
+
+test("rejects an unknown requested model before thread/start and turn/start", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "done",
+    modelList: [{
+      id: "catalog-id",
+      model: "gpt-5-codex",
+      isDefault: true,
+      supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }]
+    }]
+  }, invocations));
+
+  const result = await executor.execute({
+    taskId: TASK_ID,
+    instruction: "inspect",
+    model: "unknown-model"
+  } as Parameters<typeof executor.execute>[0] & { model: string });
+
+  assert.equal(result.kind, "failed");
+  assert.equal(invocations[0]!.stdin.includes('"method":"thread/start"'), false);
+  assert.equal(invocations[0]!.stdin.includes('"method":"turn/start"'), false);
+});
+
+test("rejects an unsupported reasoning effort before thread/start and turn/start", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "done",
+    modelList: [{
+      id: "catalog-id",
+      model: "gpt-5-codex",
+      isDefault: true,
+      supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Low" }]
+    }]
+  }, invocations));
+
+  const result = await executor.execute({
+    taskId: TASK_ID,
+    instruction: "inspect",
+    model: "gpt-5-codex",
+    reasoning_effort: "high"
+  } as Parameters<typeof executor.execute>[0] & { model: string; reasoning_effort: string });
+
+  assert.equal(result.kind, "failed");
+  assert.equal(invocations[0]!.stdin.includes('"method":"thread/start"'), false);
+  assert.equal(invocations[0]!.stdin.includes('"method":"turn/start"'), false);
+});
+
+test("uses the default model for effort-only selection and sends only the effort override", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "done",
+    modelList: [{
+      id: "catalog-id",
+      model: "default-model",
+      isDefault: true,
+      defaultReasoningEffort: "medium",
+      supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "Medium" }]
+    }]
+  }, invocations));
+
+  const result = await executor.execute({
+    taskId: TASK_ID,
+    instruction: "inspect",
+    reasoning_effort: "medium"
+  } as Parameters<typeof executor.execute>[0] & { reasoning_effort: string });
+
+  assert.equal(result.kind, "completed");
+  const messages = invocations[0]!.stdin.trim().split("\n").map((line) => JSON.parse(line));
+  const turnStart = messages.find((message: { method?: string }) => message.method === "turn/start");
+  assert.equal("model" in turnStart.params, false);
+  assert.equal(turnStart.params.effort, "medium");
+  assert.equal("reasoning_effort" in turnStart.params, false);
 });
 
 test("steer requires turn/started readiness and controls reset between turns", async () => {

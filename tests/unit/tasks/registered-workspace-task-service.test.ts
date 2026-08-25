@@ -632,6 +632,75 @@ test("normalizes and fixes the executor selection for each interactive task", as
   ]);
 });
 
+test("forwards Codex model selection through legacy and interactive task paths", async () => {
+  const calls: ExecutorRequest[] = [];
+  const executor: Executor = {
+    execute: async (request) => {
+      calls.push(request);
+      return { kind: "completed", output: "done" };
+    }
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+
+  const legacy = service.runTask({
+    workspace_id: "known",
+    instruction: "legacy",
+    model: "gpt-5-codex",
+    reasoning_effort: "high"
+  } as Parameters<RegisteredWorkspaceTaskService["runTask"]>[0] & {
+    model: string;
+    reasoning_effort: string;
+  });
+  await waitForTerminal(service, legacy.taskId);
+
+  const interactive = service.startTask({
+    workspace_id: "known",
+    instruction: "interactive",
+    model: "gpt-5-codex",
+    reasoning_effort: "high"
+  } as Parameters<RegisteredWorkspaceTaskService["startTask"]>[0] & {
+    model: string;
+    reasoning_effort: string;
+  });
+  await waitForInteractiveReady(service, interactive.taskId);
+
+  assert.deepEqual(calls.map((request) => {
+    const selected = request as ExecutorRequest & { model?: string; reasoning_effort?: string };
+    return {
+      taskId: selected.taskId,
+      instruction: selected.instruction,
+      model: selected.model,
+      reasoning_effort: selected.reasoning_effort
+    };
+  }), [
+    { taskId: legacy.taskId, instruction: "legacy", model: "gpt-5-codex", reasoning_effort: "high" },
+    { taskId: interactive.taskId, instruction: "interactive", model: "gpt-5-codex", reasoning_effort: "high" }
+  ]);
+});
+
+test("rejects Codex-only selection fields for DSH tasks", () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => ({
+    execute: async () => ({ kind: "completed", output: "unexpected" })
+  }));
+
+  assert.throws(() => service.runTask({
+    workspace_id: "known",
+    instruction: "inspect",
+    executor: "dsh",
+    model: "gpt-5-codex"
+  } as Parameters<RegisteredWorkspaceTaskService["runTask"]>[0] & { model: string }), (error) =>
+    error instanceof CoreError && error.code === "UNSUPPORTED_ACTION"
+  );
+  assert.throws(() => service.startTask({
+    workspace_id: "known",
+    instruction: "inspect",
+    executor: "dsh",
+    reasoning_effort: "high"
+  } as Parameters<RegisteredWorkspaceTaskService["startTask"]>[0] & { reasoning_effort: string }), (error) =>
+    error instanceof CoreError && error.code === "UNSUPPORTED_ACTION"
+  );
+});
+
 test("records an unknown workspace asynchronously without creating an executor", async () => {
   let factories = 0;
   const service = new RegisteredWorkspaceTaskService(registry(), () => {

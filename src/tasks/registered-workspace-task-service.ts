@@ -12,6 +12,8 @@ export interface RegisteredWorkspaceTaskRequest {
   readonly workspace_id: string;
   readonly instruction: string;
   readonly executor?: ExecutorName;
+  readonly model?: string;
+  readonly reasoning_effort?: string;
 }
 
 type NormalizedRegisteredWorkspaceTaskRequest = RegisteredWorkspaceTaskRequest & { readonly executor: ExecutorName };
@@ -112,6 +114,7 @@ export class RegisteredWorkspaceTaskService {
     completedOutputTransform?: CompletedOutputTransform,
     terminalTaskHandler?: TerminalTaskHandler
   ): { taskId: Id } {
+    if (request.executor === "dsh" && (request.model !== undefined || request.reasoning_effort !== undefined)) throw new CoreError("UNSUPPORTED_ACTION");
     const taskId = newId();
     const normalizedRequest = { ...request, executor: request.executor ?? "codex" };
     this.tasks.set(taskId, { state: "queued", executor: normalizedRequest.executor });
@@ -186,6 +189,7 @@ export class RegisteredWorkspaceTaskService {
   }
 
   startTask(request: RegisteredWorkspaceTaskRequest): { taskId: Id } {
+    if (request.executor === "dsh" && (request.model !== undefined || request.reasoning_effort !== undefined)) throw new CoreError("UNSUPPORTED_ACTION");
     const taskId = newId();
     const normalizedRequest = { ...request, executor: request.executor ?? "codex" };
     this.interactive.set(taskId, { state: "queued", request: normalizedRequest, evidence: [] });
@@ -311,7 +315,10 @@ export class RegisteredWorkspaceTaskService {
       const executor = this.executorFactory(record.request.executor, registration.root);
       record.executor = executor;
       const result = await executor.execute({ taskId, instruction: record.request.instruction,
-        sandbox: "read-only", threadId: record.threadId,
+        sandbox: "read-only",
+        ...(record.threadId !== undefined ? { threadId: record.threadId } : {}),
+        ...(record.request.model !== undefined ? { model: record.request.model } : {}),
+        ...(record.request.reasoning_effort !== undefined ? { reasoning_effort: record.request.reasoning_effort } : {}),
         onEvidence: (items) => { record.evidence = items; } });
       record.executor = undefined;
       record.threadId = result.threadId ?? record.threadId;
@@ -349,7 +356,9 @@ export class RegisteredWorkspaceTaskService {
       // control_task can reach the existing interrupt/steer seam; the terminal
       // record below replaces it once the run settles.
       this.tasks.set(taskId, { state: "running", executor: request.executor, active: executor });
-      const result = await executor.execute({ taskId, instruction: request.instruction });
+      const result = await executor.execute({ taskId, instruction: request.instruction,
+        ...(request.model !== undefined ? { model: request.model } : {}),
+        ...(request.reasoning_effort !== undefined ? { reasoning_effort: request.reasoning_effort } : {}) });
       const taskResult: RegisteredWorkspaceTaskResult = result.kind === "completed"
         ? {
           id: taskId,

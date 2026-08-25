@@ -18,6 +18,8 @@ export interface ExecutorRequest {
   readonly taskId: Id;
   readonly instruction: string;
   readonly sandbox?: SandboxMode;
+  readonly model?: string;
+  readonly reasoning_effort?: string;
   readonly threadId?: string | undefined;
   readonly onEvidence?: (evidence: readonly ExecutorEvidence[]) => void;
 }
