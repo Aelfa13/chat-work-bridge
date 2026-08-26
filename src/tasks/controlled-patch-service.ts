@@ -239,11 +239,11 @@ export class ControlledPatchService {
         proposal.state = "applied";
         this.appliedProposalTaskIds.push(request.patch_task_id as Id);
         this.trimAppliedProposals();
-        this.tasks.unpinTask(request.patch_task_id as Id);
         try {
           await this.persist();
         } catch {
           await this.persist();
+          this.tasks.unpinTask(request.patch_task_id as Id);
           return {
             patch_task_id: request.patch_task_id as Id,
             applied: true,
@@ -252,6 +252,7 @@ export class ControlledPatchService {
             metadata_recovered: true
           };
         }
+        this.tasks.unpinTask(request.patch_task_id as Id);
         return { patch_task_id: request.patch_task_id as Id, applied: true, changed_paths: targets.map(({ path }) => path) };
       } catch (error) {
         if (proposal.state === "applying") {

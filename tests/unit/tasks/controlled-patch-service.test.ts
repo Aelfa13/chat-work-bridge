@@ -2113,6 +2113,99 @@ index 9d1c2f3..3b18e51 100644
   }
 });
 
+test("keeps the task retained while final applied persistence is pending", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const current = fixture(
+    root,
+    async () => ({ kind: "completed", output: validPatch }),
+    undefined,
+    stateFilePath
+  );
+  const generated = await current.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await terminal(current.tasks, generated.taskId);
+
+  let signalFinalPersistStarted!: () => void;
+  const finalPersistStarted = new Promise<void>((resolve) => { signalFinalPersistStarted = resolve; });
+  let releaseFinalPersist!: () => void;
+  const finalPersistRelease = new Promise<void>((resolve) => { releaseFinalPersist = resolve; });
+  const persistence = current.controlled as unknown as {
+    replaceStateFile(contents: string): Promise<void>;
+  };
+  const originalReplaceStateFile = persistence.replaceStateFile;
+  persistence.replaceStateFile = async (contents) => {
+    const pending = JSON.parse(contents) as {
+      proposals: Array<{ task_id: string; state: string }>;
+    };
+    if (pending.proposals.find(({ task_id }) => task_id === generated.taskId)?.state === "applied") {
+      signalFinalPersistStarted();
+      await finalPersistRelease;
+    }
+    await originalReplaceStateFile.call(current.controlled, contents);
+  };
+
+  let applyPromise: ReturnType<ControlledPatchService["apply"]> | undefined;
+  try {
+    applyPromise = current.controlled.apply({
+      patch_task_id: generated.taskId,
+      confirmation: "APPLY"
+    });
+    await finalPersistStarted;
+
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+    const durableWhilePending = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+      proposals: Array<{ task_id: string; state: string }>;
+    };
+    assert.equal(
+      durableWhilePending.proposals.find(({ task_id }) => task_id === generated.taskId)?.state,
+      "applying"
+    );
+
+    const terminalTaskIds = Array.from({ length: 100 }, () =>
+      current.tasks.runTask({
+        workspace_id: "workspace",
+        instruction: "terminal history pressure"
+      }).taskId
+    );
+    await Promise.all(terminalTaskIds.map((taskId) => terminal(current.tasks, taskId)));
+
+    assert.deepEqual(current.tasks.taskView(generated.taskId), {
+      taskId: generated.taskId,
+      state: "completed",
+      executor: "codex",
+      ready: true,
+      output: validPatch
+    });
+    assert.deepEqual(current.tasks.result(generated.taskId), {
+      id: generated.taskId,
+      state: "completed",
+      output: validPatch
+    });
+
+    releaseFinalPersist();
+    assert.deepEqual(await applyPromise, {
+      patch_task_id: generated.taskId,
+      applied: true,
+      changed_paths: ["note.txt"]
+    });
+
+    const durableAfterApply = JSON.parse(readFileSync(stateFilePath, "utf8")) as {
+      proposals: Array<{ task_id: string; state: string }>;
+    };
+    assert.equal(
+      durableAfterApply.proposals.find(({ task_id }) => task_id === generated.taskId)?.state,
+      "applied"
+    );
+  } finally {
+    releaseFinalPersist();
+    await applyPromise?.catch(() => undefined);
+    persistence.replaceStateFile = originalReplaceStateFile;
+  }
+});
+
 test("reports metadata recovery when final persistence fails after APPLY executes", async () => {
   const root = repository();
   const stateFilePath = retainedStateFile();
