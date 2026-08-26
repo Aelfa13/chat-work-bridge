@@ -2,11 +2,11 @@
 
 **打通 Chat 与本地 Codex 与 Deepseek harness：不再搬提示词，Chat 直接调度、监督并验收 Codex 与 Deepseek harness。**
 
-[![Stable v1.2.1](https://img.shields.io/badge/stable-v1.2.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1)
+[![Release prep v1.3.0](https://img.shields.io/badge/release%20prep-v1.3.0-orange)](RELEASE_NOTES.md)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **[v1.2.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.2.1) · V1 稳定版 · 本地运行 · macOS 由维护者持续实测。** 这是 V1 稳定版（`v1.2.1`），但不表示已发布到 npm。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
+[English](README.en.md) · **v1.3.0 release prep · V1 · 本地运行 · macOS 由维护者持续实测。** 当前 package metadata 与文档面向 `v1.3.0`，但不表示该 tag、GitHub Release 或 npm publication 已存在。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
 
 ## 以前 / 现在
 
@@ -62,7 +62,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **规划端与执行端各司其职。** Chat 梳理目标；本机执行器（Codex 或 DSH）检查真实工作区并给出证据或补丁；Bridge 限定并校验交接过程。
 - **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
 - **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
-- **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持，但原理上皆通。
+- **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。Codex 调用还可选 `model` 与 `reasoning_effort`，并按 Codex `model/list` 校验；DSH 不接受这两个选项。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持，但原理上皆通。
 
 ## 一个真实案例
 
@@ -75,9 +75,9 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 | 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | 不自动测试、stage、commit、push 或创建 Release | workspace GUI/manager |
 | 在 `project_root` 内用精确 `BIND`/`CREATE` 绑定或创建工作区 | 不是 OS 级读取隔离 | 其他 CLI agent 逐个适配 |
 | 写入前生成完整 Git 补丁；managed 工作区经精确 `AUTHORIZE` 后受控写入 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | DSH 原生 headless session resume |
-| 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有自动超时 | 持久 task/audit 历史 |
+| 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有资源配额 | 持久 task/audit 历史 |
 | 受控补丁提案/应用历史与 managed 工作区目录跨重启保留 | — | 谨慎探索多 agent 编排 |
-| 通过 STDIO 提供九个本地 MCP 工具 | — | — |
+| 通过 STDIO 提供十个本地 MCP 工具 | — | — |
 
 ## Quick Start
 
@@ -101,7 +101,7 @@ npm install
 npm run build
 ```
 
-V1 稳定版（`v1.2.1`）没有一键安装器。
+当前 v1.3.0 release prep 没有一键安装器。
 
 ### 3. 登记工作区
 
@@ -146,7 +146,7 @@ V1 稳定版（`v1.2.1`）没有一键安装器。
 
 使用 DSH 时，若 `DEEPSEEK_API_KEY` 已设置在 Bridge 进程运行时的环境变量中（例如 shell 或启动器环境），Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量。不要把它写进这里的 `env` 覆盖或任何配置文件——密钥不应落入配置。
 
-重新连接集成，并确认能看到以下九个当前 V1 工具：
+重新连接集成，并确认能看到以下十个当前 V1 工具：
 
 - `run_task`
 - `task_result`
@@ -156,13 +156,14 @@ V1 稳定版（`v1.2.1`）没有一键安装器。
 - `authorize_workspace_write`
 - `generate_controlled_patch`
 - `refine_controlled_patch`
+- `submit_controlled_patch`
 - `apply_controlled_patch`
 
 ### 5. 第一次只读任务
 
 > 在工作区 `my-project` 中列出顶层文件；如果存在 Git HEAD，也报告其准确值。不要修改任何内容。
 
-普通 `run_task` 始终只读（可选 `executor: "codex" | "dsh"`，默认 `codex`），成功调用会返回 task ID。V1 交互监督的操作顺序是：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 通过 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`；这正是 V1 相比旧的一次性 task/result 流程的核心变化。轮询 `task_result`：非交互任务在排队或运行中返回 `ready: false`，最终返回 `output` 或安全的 `error`。交互任务的成功轮次进入 `waiting_for_supervisor_review`；此时结果包含状态/就绪信息、有限的证据和接受前可见的 `review_output`。`task_result` 还返回固定的 `executor`；Codex 任务在原生 thread 存在时返回真实 `thread_id`，DSH 任务因 headless 接口没有可机器恢复的 session seam 而绝不伪造 `thread_id`（DSH 的 `continue` 是新的执行）。`control_task` 只接受交互式 `run_task` 的 task ID：`continue` 保留原生 Codex thread 连续性，`interrupt` 只适用于正在运行的交互任务并以 failed 结束（若执行器真实产生了部分输出，`task_result` 会以 `partial_output` 返回该内容，状态仍是 failed），`accept` 完成后 `task_result` 才返回最终 `output` 或 `error`。自行检查工作区：
+普通 `run_task` 始终只读（可选 `executor: "codex" | "dsh"`，默认 `codex`），成功调用会返回 task ID。V1 交互监督的操作顺序是：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 通过 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`；这正是 V1 相比旧的一次性 task/result 流程的核心变化。轮询 `task_result`：非交互任务在排队或运行中返回 `ready: false`，最终返回 `output` 或安全的 `error`。交互任务的成功轮次进入 `waiting_for_supervisor_review`；此时结果包含状态/就绪信息、有限的证据和接受前可见的 `review_output`。`task_result` 还返回固定的 `executor`；Codex 任务在原生 thread 存在时返回真实 `thread_id`，DSH 任务因 headless 接口没有可机器恢复的 session seam 而绝不伪造 `thread_id`（DSH 的 `continue` 是新的执行）。对于交互式 `run_task`，`continue` 保留原生 Codex thread 连续性，`interrupt` 只适用于 running 并以 failed 结束（若执行器真实产生了部分输出，`task_result` 会以 `partial_output` 返回该内容，状态仍是 failed），`accept` 完成后 `task_result` 才返回最终 `output` 或 `error`。运行中的 generated/refined proposal 也可通过 `control_task` interrupt（Codex 还可 steer），但不能 continue 或 accept。自行检查工作区：
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -185,9 +186,9 @@ git -C /absolute/path/to/my-project status --short
 ```
 
 1. 确认配置根目录就是 Git 顶层，且 tracked 工作树和 index 均干净（已有 HEAD，或支持 unborn 仓库的新增文件提案）。
-2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求（可选 `executor: "codex" | "dsh"`，默认 `codex`）。这是独立的受控补丁流程，不使用交互式 `run_task` 监督流；**生成/refine 是只读提案，可在任意已登记工作区进行，无需写授权**。
-3. 用 `task_result` 轮询返回的 patch task ID，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求（同样可选 `executor: "codex" | "dsh"`，默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。它会保留原提案，基于同一个 `base_head` 返回新的完整提案。提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` 接受。
-4. 在任务状态之外，按 `generate_controlled_patch` → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。managed 工作区在 APPLY 前如有需要先完成 `AUTHORIZE`。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。
+2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求（可选 `executor: "codex" | "dsh"`，默认 `codex`）；或者用 `submit_controlled_patch` 提交 caller 已提供的完整 unified diff 与精确 current `base_head`。submit 不运行执行器，但会执行相同的只读 preflight。**生成/refine/submit 都是只读提案，可在任意已登记工作区进行，无需写授权**。
+3. 对生成的 patch task ID 使用 `task_result`，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。submitted proposal 注册时已经 completed。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求（同样可选 `executor: "codex" | "dsh"`，默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。它会保留原提案，基于同一个 `base_head` 返回新的完整提案。运行中的 generated/refined task 可通过 `control_task` interrupt（Codex 还可 steer），但提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` accept。
+4. 在任务状态之外，按 generate/refine/submit → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。managed 工作区在 APPLY 前如有需要先完成 `AUTHORIZE`。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。
 5. 检查结果：
 
    ```sh
@@ -218,7 +219,7 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 - Bridge 拒绝 delete、rename、copy、binary、mode change、executable、symlink、submodule、危险路径等不支持的补丁，也拒绝目标已存在的新增。
 - Bridge 不会自动测试、stage、commit、push 或创建 Release。
 - Codex 后端是 `codex app-server --stdio`，不经过 shell，approval 为 `never`，网络禁用；DSH 通过官方 headless 接口运行，Bridge 对每个 DSH 进程强制 `DSH_PERMISSION_MODE=read-only`，只透传显式 allowlist（含 `DEEPSEEK_API_KEY`、`DSH_TOOLS_MODE`），不透传 proxy 变量。普通/监督任务和提案生成均保持只读，只有经审阅后精确确认 `APPLY` 的应用步骤会写文件。
-- 任务监督状态（task/thread/evidence/review）仅存在于当前进程；受控补丁提案/应用历史与 managed 工作区目录跨重启保留（两个本地状态文件，0600 权限）。V1 没有自动超时。正在运行的交互任务可通过 `control_task(action: "interrupt")` 显式中断；真实 interrupt 产生的部分输出会以 `partial_output` 返回，普通失败不重新暴露 stderr 或失败 stdout。
+- 任务监督状态（task/thread/evidence/review）仅存在于当前进程；受控补丁提案/应用历史与 managed 工作区目录跨重启保留（两个本地状态文件，0600 权限）。每次执行器运行有 15 分钟 hard deadline；active Codex turn 连续 2 分钟没有匹配的 protocol activity 会以 `EXECUTOR_STALLED` 失败，短 Codex RPC 另有 30 秒 bound。正在运行的任务可通过 `control_task(action: "interrupt")` 显式中断；interactive task 的真实 interrupt 若产生部分输出，会以 `partial_output` 返回，普通失败不重新暴露 stderr 或失败 stdout。
 - 工作区登记两种方式：`workspaces.json` 手动登记（权威），或 `project_root` 批准根目录内的精确 `BIND`/`CREATE` 受管登记；调用时都必须提供已登记的 `workspace_id`。
 - Codex 证据若被既有 bound 截断/淘汰，会带显式 marker（`[truncated]`、changes 省略计数、evidence-drop）——它们表示诊断信息不完整，不是完整 transcript。
 - 只读执行不是 OS 级文件读取隔离；同一系统用户的进程仍可读取操作系统允许的其他文件。
@@ -228,12 +229,12 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到九个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **看不到十个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node`、`codex` 或 `dsh`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这些可执行文件的路径。
 - **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
 - **受控写入被拒绝：** 检查受控写权限（manual `allow_write` 或 managed `AUTHORIZE`）、Git 顶层与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
 - **手动启动后看似卡住：** 这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
-- **任务一直不结束：** V1 没有自动超时；正在运行的交互任务可通过 `control_task(action: "interrupt")` 显式中断。其余任务只能继续轮询；重启 Bridge 会按设计丢弃任务监督状态，受控补丁提案与 managed 工作区目录会保留。
+- **任务长时间不结束：** 执行器运行、Codex protocol inactivity 与短 RPC 都有上述 bounds；正在运行的任务也可通过 `control_task(action: "interrupt")` 显式中断。重启 Bridge 会按设计丢弃任务监督状态，受控补丁提案与 managed 工作区目录会保留。
 
 ## 项目故事
 

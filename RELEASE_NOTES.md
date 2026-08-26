@@ -1,12 +1,27 @@
 # Release notes
 
-## Unreleased
+## v1.3.0 (unreleased)
 
-Controlled-patch proposals can now be generated and refined by either executor, while application remains a deterministic, model-free step.
+This repository is prepared for v1.3.0; this section does not assert that a tag, GitHub Release, or npm publication exists.
 
-- `generate_controlled_patch` and `refine_controlled_patch` accept an optional `executor: "codex" | "dsh"`, selected per call and defaulting to `codex` when omitted; refinement never inherits the source proposal's executor.
-- DSH-generated proposals use the same retained read-only proposal lifecycle and exact `APPLY` flow as Codex proposals, including restart retention. `apply_controlled_patch` itself takes no executor and invokes no model.
-- Retained proposals persist their executor; legacy records without the field restore as `codex`, records with an invalid executor value are quarantined fail-closed, and restored tasks report the real executor.
+### Added
+
+- Add `submit_controlled_patch` for registering a caller-provided complete unified Git diff against the exact current `base_head`. Submission runs the shared read-only preflight, records `source: "submitted"` without an executor identity, survives restart, and still requires human review, write authorization, and exact `APPLY`.
+- Let `generate_controlled_patch` and `refine_controlled_patch` select Codex or DSH per call (default Codex), while keeping application deterministic and model-free. Refinement does not inherit the source proposal's executor.
+- Add optional Codex-only `model` and `reasoning_effort` inputs to `run_task`, `generate_controlled_patch`, and `refine_controlled_patch`; requested values are checked against Codex `model/list`. DSH rejects these options.
+- Allow running generated or refined proposal tasks to be interrupted through `control_task`; interrupted tasks finish with `TASK_INTERRUPTED`.
+
+### Fixed
+
+- Bound executor termination across normal completion, interruption, direct-child exit, inherited open pipes, hard deadlines, and live Windows process trees so tasks settle without leaving the one-shot executor process tree running.
+- Preserve the beginning and true end of oversized DSH stdout, including interrupted output, within the existing 1 MiB bound.
+- Harden controlled-patch application recovery, serialize concurrent applications per workspace, and persist final applied metadata before releasing the retained task.
+- Bound controlled-patch and onboarding Git subprocesses, preserve supported public error classifications, and finalize tasks when terminal-result handlers fail.
+
+### Reliability / Performance
+
+- Bound short Codex JSON-RPC calls to 30 seconds independently of the 15-minute executor deadline; active Codex turns also fail after two minutes without matching protocol activity.
+- Restore retained controlled-patch tasks in one validated batch, eliminating repeated global terminal-retention scans while preserving task order and provenance.
 
 The v1.2.1 Windows validation boundary is unchanged; full multi-client / all-Windows certification is not claimed.
 

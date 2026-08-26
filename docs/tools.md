@@ -1,12 +1,12 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.2.0). The local STDIO MCP server exposes nine tools.
+This is the tool surface of Engineering Bridge V1 (1.3.0). The local STDIO MCP server exposes ten tools.
 
 ## `run_task`
 
-Inputs: `workspace_id`, `instruction`, optional `executor` (`"codex" | "dsh"`, default `codex`).
+Inputs: `workspace_id`, `instruction`, optional `executor` (`"codex" | "dsh"`, default `codex`), and optional Codex-only `model` and `reasoning_effort`.
 
-Starts a supervised task with the selected executor and returns `task_id`. `run_task` is always read-only: Codex uses approval `never`, a read-only sandbox policy, and disabled network access; DSH is pinned read-only per process. An unknown workspace becomes a failed task; it does not grant access to a new path. The executor selection is fixed for the task lifetime and reported honestly in `task_result`.
+Starts a supervised task with the selected executor and returns `task_id`. `run_task` is always read-only: Codex uses approval `never`, a read-only sandbox policy, and disabled network access; DSH is pinned read-only per process. Codex validates requested model/reasoning support through `model/list`; DSH rejects either option. An unknown workspace becomes a failed task; it does not grant access to a new path. The executor selection is fixed for the task lifetime and reported honestly in `task_result`.
 
 ## `task_result`
 
@@ -32,7 +32,7 @@ The actions are state-specific:
 - `interrupt`: while `running`, interrupts the active turn. When interruption completes, the task ends as `failed`; genuine partial output may be exposed as `partial_output`.
 - `accept`: while `waiting_for_supervisor_review`, marks the reviewed output `completed` without starting another turn.
 
-Invalid actions for the current state return `INVALID_STATE_TRANSITION`. There is no automatic timeout, automatic acceptance, or persistent task supervision state.
+Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog and short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
 
 ## `bind_project`
 
@@ -54,15 +54,21 @@ Grants persistent controlled-write permission to one managed workspace only; man
 
 ## `generate_controlled_patch`
 
-Inputs: `workspace_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`).
+Inputs: `workspace_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`), and optional Codex-only `model` and `reasoning_effort`.
 
 Read-only proposal flow available in any registered workspace; no write authorization is required to generate. It verifies that the configured root resolves to the Git top-level and that tracked state and the index are clean (with an existing HEAD, or unborn-repository support for added-file proposals), records and returns `base_head`, and starts a separate read-only proposal task that does not modify files. The proposal and its applied history persist to `<config>.controlled-patches.json`.
 
 ## `refine_controlled_patch`
 
-Inputs: `patch_task_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`).
+Inputs: `patch_task_id`, `change_request`, optional `executor` (`"codex" | "dsh"`, default `codex`), and optional Codex-only `model` and `reasoning_effort`.
 
 Read-only refinement of a completed controlled-patch proposal: returns a new complete proposal against the same `base_head`, preserving the source proposal. The executor is selected per call and defaults to `codex`; it is not inherited from the parent proposal. Requires the source task to be `completed` and the workspace base to be unchanged. No write authorization is required; it never modifies files.
+
+## `submit_controlled_patch`
+
+Inputs: `workspace_id`, `base_head`, `diff`.
+
+Registers a caller-provided complete unified Git diff as a retained, already-completed read-only proposal. `base_head` must exactly equal the current commit HEAD, and the shared controlled-patch preflight verifies the workspace and diff before registration. No executor or model runs, so `task_result` reports `source: "submitted"` without an executor identity. Submission requires no write authorization; application still requires human review, write permission, exact `APPLY`, and all normal rechecks.
 
 ## `apply_controlled_patch`
 

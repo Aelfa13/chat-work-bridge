@@ -1,6 +1,6 @@
 # Security design
 
-This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.2.0).
+This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.3.0).
 
 ## Enforced in code
 
@@ -10,7 +10,8 @@ This document separates enforced behavior from operating assumptions for the Eng
 - `partial_output` is returned only from a genuine interrupted executor result; the task state stays `failed`, and ordinary failures never re-expose stderr or partial stdout.
 - Codex evidence stays within its existing bounds (string length, changes count, total entry count); truncation and eviction are made visible through explicit markers rather than silently dropped. Markers indicate incomplete diagnostic information, not a complete transcript.
 - Write access defaults to disabled. Manual workspaces enable it through `allow_write: true` in `workspaces.json`; managed workspaces grant it only through `authorize_workspace_write` with exact `AUTHORIZE`, which never modifies a manual registration.
-- Controlled patch generation and refinement are read-only and require no write authorization; they verify a clean Git top-level (existing HEAD or unborn-base support) and record the base HEAD. Files are not modified during generation or refinement.
+- Controlled patch generation, refinement, and submission are read-only and require no write authorization; they verify a clean Git top-level (existing HEAD or unborn-base support) and record or require the exact base HEAD. Submission performs the shared preflight without running an executor. Files are not modified during generation, refinement, or submission.
+- Executor runs have a 15-minute hard deadline with bounded process-tree termination; active Codex turns also have a two-minute matching-protocol-activity watchdog and short Codex RPC calls have a separate 30-second bound. Controlled-patch and onboarding Git subprocesses have a 60-second bound.
 - Application requires exact, case-sensitive `APPLY`, a completed one-use proposal, controlled-write permission, and rechecks the canonical Git root, HEAD, and clean tracked worktree/index before validating the patch.
 - Patch validation accepts modifications to existing tracked regular files and exact 100644 ordinary text-file additions whose target is absent from base HEAD, the index, and the worktree; unborn bases support additions only.
 - Deletions, rename/copy, binary patches, mode changes, executable additions, symlinks, submodules, unsafe paths, duplicate paths, and malformed or inconsistent headers are rejected.
@@ -42,6 +43,6 @@ The patch-generation prompt constrains expected output but is not relied upon by
 
 ## Not provided
 
-Bridge has no caller authentication, HTTP or remote service, UI, persistent database, persistent task/thread/evidence supervision history, persistent logs, automatic timeout, automatic acceptance, or restart recovery of active task state. Do not expose the STDIO process through an untrusted wrapper. Do not place credentials or sensitive material in prompts, configuration, or public reports.
+Bridge has no caller authentication, HTTP or remote service, UI, persistent database, persistent task/thread/evidence supervision history, persistent logs, resource quota, automatic acceptance, or restart recovery of active task state. Do not expose the STDIO process through an untrusted wrapper. Do not place credentials or sensitive material in prompts, configuration, or public reports.
 
 See [SECURITY.md](../SECURITY.md) for the operator-facing security policy and [threat-model.md](threat-model.md) for the compact threat summary.

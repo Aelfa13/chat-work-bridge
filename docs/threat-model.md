@@ -1,6 +1,6 @@
 # Threat model
 
-This threat model covers the Engineering Bridge V1 (1.2.0). Bridge assumes one trusted local operator controls startup configuration and the local MCP client. It is not designed for untrusted remote callers.
+This threat model covers the Engineering Bridge V1 (1.3.0). Bridge assumes one trusted local operator controls startup configuration and the local MCP client. It is not designed for untrusted remote callers.
 
 | Risk | Current control | Remaining responsibility or limit |
 |---|---|---|
@@ -18,6 +18,6 @@ This threat model covers the Engineering Bridge V1 (1.2.0). Bridge assumes one t
 | Automatic publication occurs | Apply uses only `git apply`; no test, add, commit, or push command exists | User remains responsible for every later Git operation |
 | Restart loses durable state | Controlled-patch proposals/applied history and the managed workspace catalog persist in two atomic 0600 state files; invalid retained records are quarantined, and global invariants fail closed | Active task supervision state (tasks, threads, evidence, review) is process-local and intentionally lost on restart |
 | Retained state is corrupted or tampered with | State files are parsed strictly; individually invalid records are skipped/quarantined, while replay/applied ambiguity and global invariants fail closed | Files are not a credential store or a complete audit log; protect them like local configuration |
-| Long-running task consumes resources | A running task may be explicitly interrupted through `control_task`, which ends it failed | No automatic timeout or resource quota is implemented |
+| Long-running task consumes resources | Executor runs have a 15-minute hard deadline with bounded process-tree termination; active Codex turns also have a two-minute protocol-inactivity watchdog, short Codex RPC calls have a 30-second bound, and a running task may be explicitly interrupted through `control_task` | No general CPU/memory resource quota is implemented |
 
 Prompt wording improves proposal quality but is not treated as an enforceable control. Code validation and human review are separate and both necessary. `control_task` acceptance of read-only output is separate from the exact `APPLY` boundary that authorizes a validated controlled patch.
