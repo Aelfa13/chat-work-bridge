@@ -18,7 +18,13 @@ const TASK_ID_VALUE = "550e8400-e29b-41d4-a716-446655440000";
 if (!isId(TASK_ID_VALUE)) throw new Error("Test task ID must be a UUID v4.");
 const TASK_ID = TASK_ID_VALUE;
 const TRUSTED_CWD = "/trusted/workspace";
-const SHORT_TIMING = { executionTimeoutMs: 30, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 25 };
+const SHORT_TIMING = {
+  executionTimeoutMs: 30,
+  interruptGraceMs: 10,
+  killGraceMs: 10,
+  protocolInactivityTimeoutMs: 25,
+  rpcCallTimeoutMs: 25
+};
 
 interface Invocation {
   executable: string;
@@ -119,8 +125,9 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
   };
 }
 
-function timedExecutor(starter: ProcessStarter, platform: NodeJS.Platform = process.platform): CodexExecutor {
-  return new CodexExecutor(TRUSTED_CWD, starter, {}, platform, SHORT_TIMING);
+function timedExecutor(starter: ProcessStarter, platform: NodeJS.Platform = process.platform,
+  timing = SHORT_TIMING): CodexExecutor {
+  return new CodexExecutor(TRUSTED_CWD, starter, {}, platform, timing);
 }
 
 async function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promise<T> {
@@ -396,7 +403,11 @@ test("cooperative Codex interrupt completion still terminates the one-shot app-s
 
 test("hard deadline terminates Codex when initialize never responds", async () => {
   const invocations: Invocation[] = [];
-  const pending = timedExecutor(fakeStarter({ hold: true }, invocations))
+  const pending = timedExecutor(
+    fakeStarter({ hold: true }, invocations),
+    process.platform,
+    { ...SHORT_TIMING, rpcCallTimeoutMs: 1_000 }
+  )
     .execute({ taskId: TASK_ID, instruction: "inspect" });
 
   assert.deepEqual(await settlesWithin(pending), {
@@ -404,6 +415,27 @@ test("hard deadline terminates Codex when initialize never responds", async () =
     error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
   });
   assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
+});
+
+test("initialize RPC times out before the whole execution deadline", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({
+    appServerOutput: "",
+    ignoredMethods: ["initialize"]
+  }, invocations), process.platform, { ...SHORT_TIMING, executionTimeoutMs: 1_000 });
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+  try {
+    assert.deepEqual(await settlesWithin(pending, 200), {
+      kind: "failed",
+      error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
+    });
+  } finally {
+    if (invocations[0]?.signals.length === 0) {
+      await executor.interrupt();
+      await pending;
+    }
+  }
 });
 
 test("stalls after command items complete without turn/completed", async () => {

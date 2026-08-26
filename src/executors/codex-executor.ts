@@ -18,6 +18,7 @@ export type ProcessStarter = (executable: string, args: readonly string[], optio
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
+const DEFAULT_RPC_CALL_TIMEOUT_MS = 30_000;
 // Official npm target of the Codex CLI, derived from a codex.cmd shim's
 // location so a Windows npm install can be launched through Node directly
 // (never through a shell).
@@ -65,13 +66,17 @@ export class CodexExecutor implements Executor {
   private turnId: string | undefined;
   private startedTurnId: string | undefined;
   private nextId = 1;
-  private pending = new Map<number, { resolve: (value: unknown) => void; reject: () => void }>();
+  private pending = new Map<number, {
+    resolve: (value: unknown) => void;
+    reject: () => void;
+    timer: NodeJS.Timeout;
+  }>();
   private beginInterrupt: (() => void) | undefined;
 
   constructor(private readonly workspaceRoot: string, private readonly startProcess: ProcessStarter = spawn,
     private readonly hostEnvironment: Readonly<NodeJS.ProcessEnv> = process.env,
     private readonly platform: NodeJS.Platform = process.platform,
-    private readonly timing: ExecutorTiming = DEFAULT_EXECUTOR_TIMING) {}
+    private readonly timing: ExecutorTiming & { readonly rpcCallTimeoutMs?: number } = DEFAULT_EXECUTOR_TIMING) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
     this.turnId = undefined;
@@ -118,7 +123,10 @@ export class CodexExecutor implements Executor {
     let terminationResult: ExecutorResult | undefined;
     let killSignalled = false;
     const rejectPending = (): void => {
-      for (const waiter of this.pending.values()) waiter.reject();
+      for (const waiter of this.pending.values()) {
+        clearTimeout(waiter.timer);
+        waiter.reject();
+      }
       this.pending.clear();
     };
     const finish = (result: ExecutorResult): void => {
@@ -266,7 +274,11 @@ export class CodexExecutor implements Executor {
         if (!object(message)) { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
         if (typeof message.id === "number" && ("result" in message || "error" in message)) {
           const waiter = this.pending.get(message.id);
-          if (waiter) { this.pending.delete(message.id); "error" in message ? waiter.reject() : waiter.resolve(message.result); }
+          if (waiter) {
+            this.pending.delete(message.id);
+            clearTimeout(waiter.timer);
+            "error" in message ? waiter.reject() : waiter.resolve(message.result);
+          }
           continue;
         }
         if (typeof message.method !== "string" || !object(message.params)) { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
@@ -422,8 +434,24 @@ export class CodexExecutor implements Executor {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       if (!this.child || this.child.stdin.destroyed) { reject(); return; }
-      this.pending.set(id, { resolve, reject: () => reject(new Error()) });
-      this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      const rejectWaiter = (): void => reject(new Error());
+      const timer = setTimeout(() => {
+        const waiter = this.pending.get(id);
+        if (!waiter) return;
+        this.pending.delete(id);
+        clearTimeout(waiter.timer);
+        waiter.reject();
+      }, this.timing.rpcCallTimeoutMs ?? DEFAULT_RPC_CALL_TIMEOUT_MS);
+      this.pending.set(id, { resolve, reject: rejectWaiter, timer });
+      try {
+        this.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+      } catch {
+        const waiter = this.pending.get(id);
+        if (!waiter) return;
+        this.pending.delete(id);
+        clearTimeout(waiter.timer);
+        waiter.reject();
+      }
     });
   }
   private notify(method: string, params: unknown): void { this.child?.stdin.write(`${JSON.stringify({ method, params })}\n`); }
