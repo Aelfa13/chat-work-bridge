@@ -880,6 +880,45 @@ test("restoreControlledPatchTask honors an explicit dsh executor and defaults le
   });
 });
 
+test("bulk controlled-patch restore validates the complete batch before installing any task", () => {
+  const service = new RegisteredWorkspaceTaskService(registry(), () => {
+    throw new Error("restored tasks must not execute");
+  });
+  const existingId = "00000000-0000-4000-8000-000000000001" as Id;
+  const freshId = "00000000-0000-4000-8000-000000000002" as Id;
+  service.restoreControlledPatchTask(existingId, "existing output", true, "codex");
+
+  assert.throws(
+    () => service.restoreControlledPatchTasks([
+      {
+        result: { id: freshId, state: "completed", output: "fresh output" },
+        pinned: true,
+        executor: "dsh"
+      },
+      {
+        result: {
+          id: existingId,
+          state: "failed",
+          error: { code: "APPLY_RECOVERY_CONFLICT", message: "conflict" }
+        },
+        pinned: false,
+        executor: "codex"
+      }
+    ]),
+    (error: unknown) => error instanceof CoreError && error.code === "INTERNAL_ERROR"
+  );
+
+  assert.equal(service.taskView(freshId), undefined);
+  assert.equal(service.result(freshId), undefined);
+  assert.deepEqual(service.taskView(existingId), {
+    taskId: existingId,
+    state: "completed",
+    executor: "codex",
+    ready: true,
+    output: "existing output"
+  });
+});
+
 test("control_task interrupt reaches a running legacy task's executor seam and finalizes as TASK_INTERRUPTED", async () => {
   let release!: (result: ExecutorResult) => void;
   const pending = new Promise<ExecutorResult>((done) => { release = done; });

@@ -34,6 +34,13 @@ export type RegisteredWorkspaceTaskResult =
     readonly partial_output?: string | undefined;
   };
 
+export type ControlledPatchTaskRestore = {
+  readonly result: RegisteredWorkspaceTaskResult;
+  readonly pinned: boolean;
+  readonly executor?: ExecutorName | undefined;
+  readonly source?: "submitted" | undefined;
+};
+
 export type ExecutorFactory = (executor: ExecutorName, workspaceRoot: string) => Executor;
 export type CompletedOutputTransform = (output: string) => string;
 
@@ -131,41 +138,45 @@ export class RegisteredWorkspaceTaskService {
     this.trimLegacyTerminalTasks();
   }
 
-  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName | undefined = "codex", source?: "submitted"): void {
-    if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
-      throw new CoreError("INTERNAL_ERROR");
+  restoreControlledPatchTasks(restorations: readonly ControlledPatchTaskRestore[]): void {
+    if (restorations.length === 0) return;
+    const batchTaskIds = new Set<Id>();
+    for (const { result } of restorations) {
+      if (batchTaskIds.has(result.id) || this.tasks.has(result.id) || this.interactive.has(result.id)) {
+        throw new CoreError("INTERNAL_ERROR");
+      }
+      batchTaskIds.add(result.id);
     }
-    const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "completed", output };
-    const record: TaskRecord = {
-      state: "completed",
-      executor: source === "submitted" ? undefined : executor ?? "codex",
-      ...(source === undefined ? {} : { source }),
-      result
-    };
-    this.tasks.set(taskId, record);
-    this.legacyTerminalTaskIds.push(taskId);
-    if (pinned) this.pinnedTaskIds.add(taskId);
+
+    for (const { result, pinned, executor, source } of restorations) {
+      const restoredExecutor = source === "submitted" ? undefined : executor ?? "codex";
+      const record: TaskRecord = result.state === "completed"
+        ? {
+          state: "completed",
+          executor: restoredExecutor,
+          ...(source === undefined ? {} : { source }),
+          result
+        }
+        : {
+          state: "failed",
+          executor: restoredExecutor,
+          ...(source === undefined ? {} : { source }),
+          result
+        };
+      this.tasks.set(result.id, record);
+      this.legacyTerminalTaskIds.push(result.id);
+      if (pinned) this.pinnedTaskIds.add(result.id);
+    }
     this.trimLegacyTerminalTasks();
   }
 
-  restoreControlledPatchTaskFailure(
-    taskId: Id,
-    error: SerializedError,
-    executor: ExecutorName | undefined = "codex",
-    source?: "submitted"
-  ): void {
-    if (this.tasks.has(taskId) || this.interactive.has(taskId)) {
-      throw new CoreError("INTERNAL_ERROR");
-    }
-    const result: RegisteredWorkspaceTaskResult = { id: taskId, state: "failed", error };
-    this.tasks.set(taskId, {
-      state: "failed",
-      executor: source === "submitted" ? undefined : executor ?? "codex",
-      ...(source === undefined ? {} : { source }),
-      result
-    });
-    this.legacyTerminalTaskIds.push(taskId);
-    this.trimLegacyTerminalTasks();
+  restoreControlledPatchTask(taskId: Id, output: string, pinned: boolean, executor: ExecutorName | undefined = "codex", source?: "submitted"): void {
+    this.restoreControlledPatchTasks([{
+      result: { id: taskId, state: "completed", output },
+      pinned,
+      executor,
+      source
+    }]);
   }
 
   // Registers a caller-submitted controlled patch as a retained completed task

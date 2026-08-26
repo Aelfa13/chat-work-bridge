@@ -1127,9 +1127,142 @@ function retainedRecord(
   };
 }
 
+function retainedTaskId(sequence: number): string {
+  return `00000000-0000-4000-8000-${sequence.toString().padStart(12, "0")}`;
+}
+
 function writeRetainedState(stateFilePath: string, state: unknown): void {
   writeFileSync(stateFilePath, `${JSON.stringify(state, null, 2)}\n`);
 }
+
+test("bulk hydration preserves mixed retained task semantics and terminal ordering", async () => {
+  const root = repository();
+  const registry = new RegisteredWorkspaceRegistry([{ id: "workspace", root, allow_write: true }]);
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const stateFilePath = retainedStateFile();
+
+  const oldestAppliedId = retainedTaskId(1);
+  const oldestConflictId = retainedTaskId(2);
+  const appliedTaskIds = [
+    oldestAppliedId,
+    ...Array.from({ length: 99 }, (_, index) => retainedTaskId(index + 3))
+  ];
+  const recentDshAppliedId = appliedTaskIds.at(-2)!;
+  const recentSubmittedAppliedId = appliedTaskIds.at(-1)!;
+  const proposedDshId = retainedTaskId(102);
+  const proposedSubmittedId = retainedTaskId(103);
+  const recentConflictId = retainedTaskId(104);
+
+  const appliedRecords = appliedTaskIds.map((taskId) => retainedRecord(taskId, root, head, {
+    state: "applied",
+    output: `applied:${taskId}\n`
+  }));
+  appliedRecords[appliedRecords.length - 2] = retainedRecord(recentDshAppliedId, root, head, {
+    state: "applied",
+    executor: "dsh",
+    output: "dsh applied output\n"
+  });
+  appliedRecords[appliedRecords.length - 1] = retainedRecord(recentSubmittedAppliedId, root, head, {
+    state: "applied",
+    executor: undefined,
+    source: "submitted",
+    output: "submitted applied output\n"
+  });
+
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: appliedTaskIds,
+    proposals: [
+      appliedRecords[0]!,
+      retainedRecord(oldestConflictId, root, head, {
+        state: "recovery_conflict",
+        output: "old conflict output\n"
+      }),
+      ...appliedRecords.slice(1),
+      retainedRecord(proposedDshId, root, head, {
+        executor: "dsh",
+        output: "dsh proposed output\n"
+      }),
+      retainedRecord(proposedSubmittedId, root, head, {
+        executor: undefined,
+        source: "submitted",
+        output: "submitted proposed output\n"
+      }),
+      retainedRecord(recentConflictId, root, head, {
+        state: "recovery_conflict",
+        executor: "dsh",
+        output: "recent conflict output\n"
+      })
+    ]
+  });
+  const originalState = readFileSync(stateFilePath, "utf8");
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => { throw new Error("restored tasks must not execute"); }
+  }));
+  const controlled = new ControlledPatchService(registry, tasks, undefined, stateFilePath);
+
+  await controlled.load();
+
+  // There are 102 unpinned terminal records. Existing ordering evicts the
+  // oldest applied record and oldest conflict, leaving exactly the newest 100.
+  assert.equal(tasks.taskView(oldestAppliedId), undefined);
+  assert.equal(tasks.result(oldestAppliedId), undefined);
+  assert.equal(tasks.taskView(oldestConflictId), undefined);
+  for (const taskId of appliedTaskIds.slice(1)) assert.notEqual(tasks.taskView(taskId), undefined);
+
+  // Proposed tasks are pinned before retention and remain reachable above cap.
+  assert.deepEqual(tasks.taskView(proposedDshId), {
+    taskId: proposedDshId,
+    state: "completed",
+    executor: "dsh",
+    ready: true,
+    output: "dsh proposed output\n"
+  });
+  assert.deepEqual(tasks.result(proposedDshId), {
+    id: proposedDshId,
+    state: "completed",
+    output: "dsh proposed output\n"
+  });
+  assert.deepEqual(tasks.taskView(proposedSubmittedId), {
+    taskId: proposedSubmittedId,
+    state: "completed",
+    source: "submitted",
+    ready: true,
+    output: "submitted proposed output\n"
+  });
+  assert.equal("executor" in (tasks.taskView(proposedSubmittedId) ?? {}), false);
+
+  // Unpinned retained records preserve output and provenance when they survive.
+  assert.equal(tasks.taskView(recentDshAppliedId)?.executor, "dsh");
+  assert.equal(tasks.taskView(recentDshAppliedId)?.output, "dsh applied output\n");
+  assert.equal(tasks.taskView(recentSubmittedAppliedId)?.source, "submitted");
+  assert.equal("executor" in (tasks.taskView(recentSubmittedAppliedId) ?? {}), false);
+  assert.deepEqual(tasks.result(recentSubmittedAppliedId), {
+    id: recentSubmittedAppliedId,
+    state: "completed",
+    output: "submitted applied output\n"
+  });
+
+  assert.deepEqual(tasks.taskView(recentConflictId), {
+    taskId: recentConflictId,
+    state: "failed",
+    executor: "dsh",
+    ready: true,
+    error: {
+      code: "APPLY_RECOVERY_CONFLICT",
+      message: "The applied patch state could not be recovered safely."
+    }
+  });
+  assert.equal(tasks.result(recentConflictId)?.state, "failed");
+  await expectCode(
+    () => controlled.apply({ patch_task_id: recentConflictId, confirmation: "APPLY" }),
+    "INVALID_STATE_TRANSITION"
+  );
+
+  // No applying record exists, so load must accept version 1 without migration
+  // or a compatibility rewrite.
+  assert.equal(readFileSync(stateFilePath, "utf8"), originalState);
+});
 
 test("quarantines a single malformed proposal field while restoring the valid proposal", async () => {
   const root = repository();

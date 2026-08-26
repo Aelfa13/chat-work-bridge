@@ -13,7 +13,11 @@ import {
 import { isId } from "../core/ids.js";
 import type { Id } from "../core/ids.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
-import { RegisteredWorkspaceTaskService, type ExecutorName } from "./registered-workspace-task-service.js";
+import {
+  RegisteredWorkspaceTaskService,
+  type ControlledPatchTaskRestore,
+  type ExecutorName
+} from "./registered-workspace-task-service.js";
 
 export type { GitStarter };
 
@@ -108,6 +112,8 @@ export class ControlledPatchService {
     }
 
     const appliedProposalTaskIds = new Set(retainedState.appliedTaskIds);
+    const restoredProposals: Array<readonly [Id, Proposal]> = [];
+    const restoredTasks: ControlledPatchTaskRestore[] = [];
     let reconciledApplyingProposal = false;
     for (const { taskId, output, ...proposal } of retainedState.proposals) {
       let restoredState = proposal.state;
@@ -124,24 +130,28 @@ export class ControlledPatchService {
           appliedProposalTaskIds.delete(taskId);
         }
       }
-      this.proposals.set(taskId, { ...proposal, state: restoredState, output });
-      if (restoredState === "recovery_conflict") {
-        this.tasks.restoreControlledPatchTaskFailure(
-          taskId,
-          serializeError(new CoreError("APPLY_RECOVERY_CONFLICT")),
-          proposal.executor,
-          proposal.executor === undefined ? "submitted" : undefined
-        );
-      } else {
-        this.tasks.restoreControlledPatchTask(
-          taskId,
-          output,
-          restoredState !== "applied",
-          proposal.executor,
-          proposal.executor === undefined ? "submitted" : undefined
-        );
-      }
+      restoredProposals.push([taskId, { ...proposal, state: restoredState, output }]);
+      const provenance = proposal.executor === undefined
+        ? { executor: undefined, source: "submitted" as const }
+        : { executor: proposal.executor };
+      restoredTasks.push(restoredState === "recovery_conflict"
+        ? {
+          result: {
+            id: taskId,
+            state: "failed",
+            error: serializeError(new CoreError("APPLY_RECOVERY_CONFLICT"))
+          },
+          pinned: false,
+          ...provenance
+        }
+        : {
+          result: { id: taskId, state: "completed", output },
+          pinned: restoredState !== "applied",
+          ...provenance
+        });
     }
+    this.tasks.restoreControlledPatchTasks(restoredTasks);
+    for (const [taskId, proposal] of restoredProposals) this.proposals.set(taskId, proposal);
     this.appliedProposalTaskIds = [...appliedProposalTaskIds];
     if (reconciledApplyingProposal) {
       await this.persist();
