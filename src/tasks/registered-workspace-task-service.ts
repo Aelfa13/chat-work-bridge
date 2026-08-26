@@ -386,9 +386,18 @@ export class RegisteredWorkspaceTaskService {
     result: RegisteredWorkspaceTaskResult,
     terminalTaskHandler?: TerminalTaskHandler
   ): Promise<void> {
-    await terminalTaskHandler?.(result);
+    let terminalResult: RegisteredWorkspaceTaskResult = result;
+    try {
+      await terminalTaskHandler?.(result);
+    } catch {
+      terminalResult = {
+        id: taskId,
+        state: "failed",
+        error: serializeError(new CoreError("INTERNAL_ERROR"))
+      };
+    }
     const executor = this.tasks.get(taskId)?.executor ?? "codex";
-    this.tasks.set(taskId, { state: result.state, executor, result });
+    this.tasks.set(taskId, { state: terminalResult.state, executor, result: terminalResult });
     this.legacyTerminalTaskIds.push(taskId);
     this.trimLegacyTerminalTasks();
   }

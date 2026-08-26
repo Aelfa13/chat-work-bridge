@@ -157,6 +157,7 @@ test("applies a completed-output transform exactly once before storing the resul
 
 test("awaits a terminal handler exactly once before exposing completed output", async () => {
   const release = deferred<void>();
+  const handlerStarted = deferred<void>();
   let handlerCalls = 0;
   const executor: Executor = { execute: async () => ({ kind: "completed", output: "done" }) };
   const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
@@ -166,13 +167,12 @@ test("awaits a terminal handler exactly once before exposing completed output", 
     async (result) => {
       handlerCalls += 1;
       assert.equal(result.state, "completed");
+      handlerStarted.resolve(undefined);
       await release.promise;
     }
   );
 
-  while (handlerCalls === 0) {
-    await new Promise<void>((resolve) => setImmediate(resolve));
-  }
+  await handlerStarted.promise;
 
   assert.equal(handlerCalls, 1);
   assert.deepEqual(service.status(taskId), { taskId, state: "running" });
@@ -187,6 +187,56 @@ test("awaits a terminal handler exactly once before exposing completed output", 
     state: "completed",
     output: "done"
   });
+});
+
+test("records INTERNAL_ERROR exactly once when a terminal handler throws", async () => {
+  const release = deferred<void>();
+  const handlerStarted = deferred<void>();
+  let handlerCalls = 0;
+  const executor: Executor = { execute: async () => ({ kind: "completed", output: "done" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask(
+    { workspace_id: "known", instruction: "inspect" },
+    undefined,
+    async (result) => {
+      handlerCalls += 1;
+      assert.deepEqual(result, { id: taskId, state: "completed", output: "done" });
+      handlerStarted.resolve(undefined);
+      await release.promise;
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+  );
+
+  await handlerStarted.promise;
+
+  assert.equal(handlerCalls, 1);
+  assert.deepEqual(service.status(taskId), { taskId, state: "running" });
+  assert.equal(service.result(taskId), undefined);
+
+  release.resolve(undefined);
+  await waitForTerminal(service, taskId);
+
+  assert.deepEqual(service.status(taskId), { taskId, state: "failed" });
+  assert.deepEqual(service.taskView(taskId), {
+    taskId,
+    state: "failed",
+    executor: "codex",
+    ready: true,
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "The request could not be completed."
+    }
+  });
+  assert.deepEqual(service.result(taskId), {
+    id: taskId,
+    state: "failed",
+    error: {
+      code: "INTERNAL_ERROR",
+      message: "The request could not be completed."
+    }
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(handlerCalls, 1);
 });
 
 test("records executor failures", async () => {
