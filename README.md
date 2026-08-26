@@ -2,11 +2,11 @@
 
 **打通 Chat 与本地 Codex 与 Deepseek harness：不再搬提示词，Chat 直接调度、监督并验收 Codex 与 Deepseek harness。**
 
-[![Release prep v1.3.0](https://img.shields.io/badge/release%20prep-v1.3.0-orange)](RELEASE_NOTES.md)
+[![v1.3.0](https://img.shields.io/badge/release-v1.3.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **v1.3.0 release prep · V1 · 本地运行 · macOS 由维护者持续实测。** 当前 package metadata 与文档面向 `v1.3.0`，但不表示该 tag、GitHub Release 或 npm publication 已存在。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
+[English](README.en.md) · **[v1.3.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.3.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
 
 ## 以前 / 现在
 
@@ -101,7 +101,7 @@ npm install
 npm run build
 ```
 
-当前 v1.3.0 release prep 没有一键安装器。
+当前 v1.3.0 没有一键安装器。
 
 ### 3. 登记工作区
 

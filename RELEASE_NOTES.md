@@ -1,8 +1,8 @@
 # Release notes
 
-## v1.3.0 (unreleased)
+## v1.3.0
 
-This repository is prepared for v1.3.0; this section does not assert that a tag, GitHub Release, or npm publication exists.
+v1.3.0 has been published as a Git tag and GitHub Release. This does not indicate npm publication.
 
 ### Added
 
