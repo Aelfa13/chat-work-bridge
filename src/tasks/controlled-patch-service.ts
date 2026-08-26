@@ -1,24 +1,21 @@
 import { spawn } from "node:child_process";
-import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "node:child_process";
 import { lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
 import { serializeError } from "../core/errors.js";
+import {
+  runBoundedGit,
+  type GitProcessOptions,
+  type GitProcessResult,
+  type GitStarter
+} from "../executors/bounded-git-process.js";
 import { isId } from "../core/ids.js";
 import type { Id } from "../core/ids.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 import { RegisteredWorkspaceTaskService, type ExecutorName } from "./registered-workspace-task-service.js";
 
-export type GitStarter = (
-  executable: string,
-  args: readonly string[],
-  options: SpawnOptionsWithoutStdio
-) => ChildProcessWithoutNullStreams;
-
-// Minimal exit-code-observing git result: the caller must be able to tell a
-// genuine failure from an expected nonzero exit (HEAD detection only).
-type GitExit = { readonly code: number; readonly stdout: string };
+export type { GitStarter };
 
 export type ProposalBase =
   | { readonly kind: "commit"; readonly head: string }
@@ -84,7 +81,8 @@ export class ControlledPatchService {
     private readonly registry: RegisteredWorkspaceRegistry,
     private readonly tasks: RegisteredWorkspaceTaskService,
     private readonly startProcess: GitStarter = spawn,
-    private readonly stateFilePath?: string
+    private readonly stateFilePath?: string,
+    private readonly gitProcessOptions: GitProcessOptions = {}
   ) {}
 
   async load(): Promise<void> {
@@ -465,50 +463,32 @@ export class ControlledPatchService {
     return { kind: "unborn" };
   }
 
-  private git(cwd: string, args: readonly string[], input?: string): Promise<string> {
-    return new Promise((resolveOutput, reject) => {
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = this.startProcess("git", args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"] });
-      } catch {
-        reject(new CoreError("WORKSPACE_PRECONDITION_FAILED"));
-        return;
-      }
-      let stdout = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-      child.stderr.resume();
-      child.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
-      child.on("close", (code) => code === 0
-        ? resolveOutput(stdout)
-        : reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
-      child.stdin.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
-      child.stdin.end(input);
-    });
+  private async git(cwd: string, args: readonly string[], input?: string): Promise<string> {
+    const result = await runBoundedGit(
+      this.startProcess,
+      cwd,
+      args,
+      input,
+      () => new CoreError("WORKSPACE_PRECONDITION_FAILED"),
+      this.gitProcessOptions
+    );
+    if (result.code !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    return result.stdout;
   }
 
   // Exit-code-observing sibling of git(), used only for HEAD detection: it
   // resolves with the exit code and stdout instead of rejecting on nonzero, so
   // detectBase can prove the unborn state instead of assuming it. All other
   // calls keep using git(), which rejects on any nonzero exit.
-  private gitResult(cwd: string, args: readonly string[], input?: string): Promise<GitExit> {
-    return new Promise((resolveOutput, reject) => {
-      let child: ChildProcessWithoutNullStreams;
-      try {
-        child = this.startProcess("git", args, { cwd, shell: false, stdio: ["pipe", "pipe", "pipe"] });
-      } catch {
-        reject(new CoreError("WORKSPACE_PRECONDITION_FAILED"));
-        return;
-      }
-      let stdout = "";
-      child.stdout.setEncoding("utf8");
-      child.stdout.on("data", (chunk: string) => { stdout += chunk; });
-      child.stderr.resume();
-      child.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
-      child.on("close", (code) => resolveOutput({ code: code ?? -1, stdout }));
-      child.stdin.on("error", () => reject(new CoreError("WORKSPACE_PRECONDITION_FAILED")));
-      child.stdin.end(input);
-    });
+  private gitResult(cwd: string, args: readonly string[], input?: string): Promise<GitProcessResult> {
+    return runBoundedGit(
+      this.startProcess,
+      cwd,
+      args,
+      input,
+      () => new CoreError("WORKSPACE_PRECONDITION_FAILED"),
+      this.gitProcessOptions
+    );
   }
 }
 
