@@ -47,6 +47,10 @@ export type CompletedOutputTransform = (output: string) => string;
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
 
 export type ControlledTaskState = RegisteredWorkspaceTaskState | "waiting_for_supervisor_review";
+export interface ControlledTaskDiagnostics {
+  readonly finalization_started_at: string;
+  readonly finalization_ended_at: string;
+}
 export interface ControlledTaskView {
   readonly taskId: Id;
   readonly state: ControlledTaskState;
@@ -66,6 +70,7 @@ export interface ControlledTaskView {
   readonly review_output?: string | undefined;
   readonly partial_output?: string | undefined;
   readonly evidence?: readonly ExecutorEvidence[];
+  readonly diagnostics?: ControlledTaskDiagnostics;
   readonly error?: SerializedError | undefined;
 }
 
@@ -74,7 +79,7 @@ export interface ControlledTaskView {
 // terminal record stores the result instead.
 type TaskRecord =
   | { state: "queued" | "running"; executor: ExecutorName; active?: Executor }
-  | { state: "completed" | "failed"; executor: ExecutorName | undefined; source?: "submitted"; result: RegisteredWorkspaceTaskResult };
+  | { state: "completed" | "failed"; executor: ExecutorName | undefined; source?: "submitted"; result: RegisteredWorkspaceTaskResult; diagnostics?: ControlledTaskDiagnostics };
 
 type NonTerminalTaskRecord = Extract<TaskRecord, { state: "queued" | "running" }>;
 
@@ -222,6 +227,7 @@ export class RegisteredWorkspaceTaskService {
         state: legacy.result.state,
         ...(legacy.executor === undefined ? {} : { executor: legacy.executor }),
         ...(legacy.source === undefined ? {} : { source: legacy.source }),
+        ...(legacy.diagnostics === undefined ? {} : { diagnostics: legacy.diagnostics }),
         ready: true
       };
       return legacy.result.state === "completed"
@@ -397,6 +403,7 @@ export class RegisteredWorkspaceTaskService {
     result: RegisteredWorkspaceTaskResult,
     terminalTaskHandler?: TerminalTaskHandler
   ): Promise<void> {
+    const finalizationStartedAt = new Date().toISOString();
     let terminalResult: RegisteredWorkspaceTaskResult = result;
     try {
       await terminalTaskHandler?.(result);
@@ -407,8 +414,12 @@ export class RegisteredWorkspaceTaskService {
         error: serializeError(new CoreError("INTERNAL_ERROR"))
       };
     }
+    const diagnostics: ControlledTaskDiagnostics = {
+      finalization_started_at: finalizationStartedAt,
+      finalization_ended_at: new Date().toISOString()
+    };
     const executor = this.tasks.get(taskId)?.executor ?? "codex";
-    this.tasks.set(taskId, { state: terminalResult.state, executor, result: terminalResult });
+    this.tasks.set(taskId, { state: terminalResult.state, executor, result: terminalResult, diagnostics });
     this.legacyTerminalTaskIds.push(taskId);
     this.trimLegacyTerminalTasks();
   }

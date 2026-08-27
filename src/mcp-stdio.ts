@@ -129,7 +129,7 @@ async function main(): Promise<void> {
   }, ({ task_id }) => {
     const view = service.taskView(task_id);
     if (view === undefined) return unknownTask();
-    return jsonContent({ task_id: view.taskId, state: view.state,
+    const taskView = { task_id: view.taskId, state: view.state,
       ...(view.source === undefined ? {} : { source: view.source }),
       ...(view.executor === undefined ? {} : { executor: view.executor }),
       ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
@@ -138,7 +138,14 @@ async function main(): Promise<void> {
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
       ...(view.partial_output === undefined ? {} : { partial_output: view.partial_output }),
       evidence: view.evidence,
-      ...(view.error === undefined ? {} : { error: view.error }) });
+      ...(view.diagnostics === undefined ? {} : { diagnostics: view.diagnostics }),
+      ...(view.error === undefined ? {} : { error: view.error }) };
+    return jsonContent({
+      ...taskView,
+      mcp_diagnostics: {
+        serialized_task_view_bytes: Buffer.byteLength(JSON.stringify(taskView), "utf8")
+      }
+    });
   });
 
   server.registerTool("control_task", {

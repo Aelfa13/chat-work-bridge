@@ -2305,7 +2305,10 @@ test("keeps the task retained while final applied persistence is pending", async
     );
     await Promise.all(terminalTaskIds.map((taskId) => terminal(current.tasks, taskId)));
 
-    assert.deepEqual(current.tasks.taskView(generated.taskId), {
+    const { diagnostics, ...taskView } = current.tasks.taskView(generated.taskId) ?? {};
+    assert.equal(typeof diagnostics?.finalization_started_at, "string");
+    assert.equal(typeof diagnostics?.finalization_ended_at, "string");
+    assert.deepEqual(taskView, {
       taskId: generated.taskId,
       state: "completed",
       executor: "codex",

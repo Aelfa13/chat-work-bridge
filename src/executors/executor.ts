@@ -24,9 +24,14 @@ export interface ExecutorRequest {
   readonly onEvidence?: (evidence: readonly ExecutorEvidence[]) => void;
 }
 
+export interface ExecutorDiagnostics {
+  readonly executor_started_at: string;
+  readonly executor_ended_at: string;
+}
+
 export type ExecutorResult =
-  | { readonly kind: "completed" | "interrupted"; readonly output: string; readonly threadId?: string | undefined; readonly evidence?: readonly ExecutorEvidence[] }
-  | { readonly kind: "failed"; readonly error: SerializedError; readonly threadId?: string | undefined; readonly evidence?: readonly ExecutorEvidence[] };
+  | { readonly kind: "completed" | "interrupted"; readonly output: string; readonly threadId?: string | undefined; readonly evidence?: readonly ExecutorEvidence[]; readonly diagnostics?: ExecutorDiagnostics }
+  | { readonly kind: "failed"; readonly error: SerializedError; readonly threadId?: string | undefined; readonly evidence?: readonly ExecutorEvidence[]; readonly diagnostics?: ExecutorDiagnostics };
 
 export interface Executor {
   execute(request: ExecutorRequest): Promise<ExecutorResult>;

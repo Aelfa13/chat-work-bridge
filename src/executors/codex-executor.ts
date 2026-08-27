@@ -18,6 +18,8 @@ export type ProcessStarter = (executable: string, args: readonly string[], optio
 const ENVIRONMENT_ALLOWLIST = ["PATH", "HOME", "CODEX_HOME", "TMPDIR", "LANG", "LC_ALL", "USER", "LOGNAME"] as const;
 const MAX_EVIDENCE = 50;
 const MAX_TEXT = 16_384;
+const MAX_EVIDENCE_BYTES = 65_536;
+const MAX_JSONL_LINE_BYTES = 65_536;
 const DEFAULT_RPC_CALL_TIMEOUT_MS = 30_000;
 // Official npm target of the Codex CLI, derived from a codex.cmd shim's
 // location so a Windows npm install can be launched through Node directly
@@ -79,6 +81,14 @@ export class CodexExecutor implements Executor {
     private readonly timing: ExecutorTiming & { readonly rpcCallTimeoutMs?: number } = DEFAULT_EXECUTOR_TIMING) {}
 
   async execute(request: ExecutorRequest): Promise<ExecutorResult> {
+    const executorStartedAt = new Date().toISOString();
+    const withDiagnostics = (result: ExecutorResult): ExecutorResult => ({
+      ...result,
+      diagnostics: {
+        executor_started_at: executorStartedAt,
+        executor_ended_at: new Date().toISOString()
+      }
+    });
     this.turnId = undefined;
     this.startedTurnId = undefined;
     let child: ChildProcessWithoutNullStreams;
@@ -104,7 +114,7 @@ export class CodexExecutor implements Executor {
         child = this.startProcess("codex", ["app-server", "--stdio"], options);
       }
       this.child = child;
-    } catch { return failure("CODEX_UNAVAILABLE"); }
+    } catch { return withDiagnostics(failure("CODEX_UNAVAILABLE")); }
 
     const evidence = new Map<string, ExecutorEvidence>();
     let evidenceDropped = 0;
@@ -163,7 +173,7 @@ export class CodexExecutor implements Executor {
       child.stdin.destroy();
       child.stdout.destroy();
       child.stderr.destroy();
-      terminal?.(finalResult);
+      terminal?.(withDiagnostics(finalResult));
     };
     const stop = (result: ExecutorResult): void => {
       if (settled) return;
@@ -188,6 +198,13 @@ export class CodexExecutor implements Executor {
           status: "completed",
           command: `${evidenceDropped} evidence item(s) dropped: evidence limit exceeded`
         }];
+    };
+    const enforceEvidenceBudget = (): void => {
+      while (evidence.size > 0 &&
+        Buffer.byteLength(JSON.stringify(visibleEvidence()), "utf8") > MAX_EVIDENCE_BYTES) {
+        evidence.delete(evidence.keys().next().value as string);
+        evidenceDropped += 1;
+      }
     };
     const currentTerminationResult = (): ExecutorResult =>
       terminationResult?.kind === "interrupted"
@@ -267,7 +284,13 @@ export class CodexExecutor implements Executor {
       buffer += chunk;
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
-        const line = buffer.slice(0, newline).trim(); buffer = buffer.slice(newline + 1);
+        const rawLine = buffer.slice(0, newline);
+        buffer = buffer.slice(newline + 1);
+        if (Buffer.byteLength(rawLine, "utf8") > MAX_JSONL_LINE_BYTES) {
+          finish(failure("CODEX_PROTOCOL_ERROR"));
+          return;
+        }
+        const line = rawLine.trim();
         if (!line) continue;
         let message: unknown;
         try { message = JSON.parse(line); } catch { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
@@ -326,6 +349,7 @@ export class CodexExecutor implements Executor {
               evidence.delete(evidence.keys().next().value as string);
               evidenceDropped += 1;
             }
+            enforceEvidenceBudget();
             request.onEvidence?.(visibleEvidence());
           }
         }
@@ -341,6 +365,9 @@ export class CodexExecutor implements Executor {
           else if (status === "completed") finish({ kind: "completed", output, ...common });
           else finish(failure("CODEX_PROTOCOL_ERROR"));
         }
+      }
+      if (Buffer.byteLength(buffer, "utf8") > MAX_JSONL_LINE_BYTES) {
+        finish(failure("CODEX_PROTOCOL_ERROR"));
       }
     });
     const finishFromExit = (code: number | null): void => {

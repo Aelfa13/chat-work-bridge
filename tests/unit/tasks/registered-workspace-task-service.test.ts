@@ -23,6 +23,12 @@ function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
   const promise = new Promise<T>((done) => { resolve = done; });
   return { promise, resolve };
 }
+function withoutDiagnostics<T extends object>(value: T): Omit<T, "diagnostics"> {
+  const semantic = { ...value };
+  Reflect.deleteProperty(semantic, "diagnostics");
+  return semantic;
+}
+
 
 // Runs the real DshExecutor against a scripted child process, so interrupt
 // tests observe the actual partial-stdout caching path.
@@ -110,7 +116,7 @@ test("taskView polls a legacy runTask through completed output", async () => {
   pending.resolve({ kind: "completed", output: "proposal diff" });
   await waitForTerminal(service, taskId);
 
-  assert.deepEqual(service.taskView(taskId), {
+  assert.deepEqual(withoutDiagnostics(service.taskView(taskId)!), {
     taskId,
     state: "completed",
     executor: "codex",
@@ -248,7 +254,7 @@ test("records INTERNAL_ERROR exactly once when a terminal handler throws", async
   await waitForTerminal(service, taskId);
 
   assert.deepEqual(service.status(taskId), { taskId, state: "failed" });
-  assert.deepEqual(service.taskView(taskId), {
+  assert.deepEqual(withoutDiagnostics(service.taskView(taskId)!), {
     taskId,
     state: "failed",
     executor: "codex",
@@ -980,7 +986,7 @@ test("control_task interrupt reaches a running legacy task's executor seam and f
     },
     partial_output: "partial diff"
   });
-  assert.deepEqual(service.taskView(taskId), {
+  assert.deepEqual(withoutDiagnostics(service.taskView(taskId)!), {
     taskId,
     state: "failed",
     executor: "codex",

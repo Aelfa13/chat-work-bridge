@@ -141,6 +141,12 @@ async function settlesWithin<T>(promise: Promise<T>, milliseconds = 100): Promis
   ]);
 }
 
+function withoutDiagnostics<T extends object>(value: T): Omit<T, "diagnostics"> {
+  const semantic = { ...value };
+  Reflect.deleteProperty(semantic, "diagnostics");
+  return semantic;
+}
+
 test("uses the fixed safe invocation and returns agent text", async () => {
   const invocations: Invocation[] = [];
   const hostEnvironment = {
@@ -255,7 +261,7 @@ test("rejects an unknown requested model before thread/start and turn/start", as
     model: "unknown-model"
   } as Parameters<typeof executor.execute>[0] & { model: string });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutDiagnostics(result), {
     kind: "failed",
     error: { code: "UNSUPPORTED_ACTION", message: "The requested action is not supported." }
   });
@@ -282,7 +288,7 @@ test("rejects an unsupported reasoning effort before thread/start and turn/start
     reasoning_effort: "high"
   } as Parameters<typeof executor.execute>[0] & { model: string; reasoning_effort: string });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutDiagnostics(result), {
     kind: "failed",
     error: { code: "UNSUPPORTED_ACTION", message: "The requested action is not supported." }
   });
@@ -357,7 +363,7 @@ test("interrupt terminates Codex while initialize is still pending", async () =>
   await new Promise<void>((resolve) => setImmediate(resolve));
   await executor.interrupt();
 
-  assert.deepEqual(await settlesWithin(pending), { kind: "interrupted", output: "", evidence: [] });
+  assert.deepEqual(withoutDiagnostics(await settlesWithin(pending)), { kind: "interrupted", output: "", evidence: [] });
   assert.deepEqual(invocations[0]?.signals, ["SIGTERM", "SIGKILL"]);
 });
 
@@ -374,7 +380,7 @@ test("interrupt forces termination when turn interrupt RPC never responds", asyn
   invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
   await executor.interrupt();
 
-  assert.deepEqual(await settlesWithin(pending), {
+  assert.deepEqual(withoutDiagnostics(await settlesWithin(pending)), {
     kind: "interrupted",
     output: "",
     threadId: "thread-1",
@@ -412,7 +418,7 @@ test("hard deadline terminates Codex when initialize never responds", async () =
   )
     .execute({ taskId: TASK_ID, instruction: "inspect" });
 
-  assert.deepEqual(await settlesWithin(pending), {
+  assert.deepEqual(withoutDiagnostics(await settlesWithin(pending)), {
     kind: "failed",
     error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
   });
@@ -428,7 +434,7 @@ test("initialize RPC times out before the whole execution deadline", async () =>
   const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
 
   try {
-    assert.deepEqual(await settlesWithin(pending, 200), {
+    assert.deepEqual(withoutDiagnostics(await settlesWithin(pending, 200)), {
       kind: "failed",
       error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
     });
@@ -610,7 +616,7 @@ test("maps a thrown spawn and a process error to unavailable", async () => {
     .execute({ taskId: TASK_ID, instruction: "x" });
 
   for (const result of [thrown, emitted]) {
-    assert.deepEqual(result, {
+    assert.deepEqual(withoutDiagnostics(result), {
       kind: "failed",
       error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable." }
     });
@@ -628,7 +634,7 @@ test("direct child exit rejects initialize and clears every pending RPC even whe
   assert.equal((executor as unknown as { pending: Map<number, unknown> }).pending.size, 1);
   invocation.exit(0);
 
-  assert.deepEqual(await settlesWithin(pending), {
+  assert.deepEqual(withoutDiagnostics(await settlesWithin(pending)), {
     kind: "failed",
     error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
   });
@@ -644,7 +650,7 @@ test("rejects malformed JSONL, missing messages, and malformed message structure
   for (const stdout of outputs) {
     const result = await new CodexExecutor(TRUSTED_CWD, fakeStarter({ stdout }, []), {})
       .execute({ taskId: TASK_ID, instruction: "x" });
-    assert.deepEqual(result, {
+    assert.deepEqual(withoutDiagnostics(result), {
       kind: "failed",
       error: { code: "CODEX_PROTOCOL_ERROR", message: "Codex returned an invalid response." }
     });
@@ -659,7 +665,7 @@ test("nonzero exit discards partial output and stderr details", async () => {
     exitCode: 7
   }, []), {}).execute({ taskId: TASK_ID, instruction: "x" });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutDiagnostics(result), {
     kind: "failed",
     error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
   });
@@ -679,7 +685,7 @@ test("reports an allowlisted failed-turn reason without exposing raw error detai
     }
   }, []), {}).execute({ taskId: TASK_ID, instruction: "x" });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutDiagnostics(result), {
     kind: "failed",
     error: {
       code: "CODEX_EXECUTION_FAILED",
@@ -705,7 +711,7 @@ test("an interrupted turn keeps the last completed agent text as real partial ou
   invocation.send({ method: "item/completed", params: { item: { id: "message-1", type: "agentMessage", text: "partial answer" } } });
   invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "interrupted" } } });
 
-  assert.deepEqual(await pending, {
+  assert.deepEqual(withoutDiagnostics(await pending), {
     kind: "interrupted",
     output: "partial answer",
     threadId: "thread-1",
@@ -1083,7 +1089,7 @@ test("win32: a spawned command that does not resolve still maps to CODEX_UNAVAIL
 
   const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
 
-  assert.deepEqual(result, {
+  assert.deepEqual(withoutDiagnostics(result), {
     kind: "failed",
     error: { code: "CODEX_UNAVAILABLE", message: "Codex is unavailable." }
   });
