@@ -3,7 +3,7 @@ import { serializeError } from "../core/errors.js";
 import type { Id } from "../core/ids.js";
 import type { SerializedError } from "../core/errors.js";
 import { CoreError } from "../core/errors.js";
-import type { Executor, ExecutorEvidence } from "../executors/executor.js";
+import type { Executor, ExecutorDiagnostics, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 
 export type ExecutorName = "codex" | "dsh";
@@ -47,10 +47,17 @@ export type CompletedOutputTransform = (output: string) => string;
 export type RegisteredWorkspaceTaskState = "queued" | "running" | "completed" | "failed";
 
 export type ControlledTaskState = RegisteredWorkspaceTaskState | "waiting_for_supervisor_review";
-export interface ControlledTaskDiagnostics {
-  readonly finalization_started_at: string;
-  readonly finalization_ended_at: string;
-}
+export type ControlledTaskDiagnostics =
+  | (ExecutorDiagnostics & {
+    readonly finalization_started_at?: never;
+    readonly finalization_ended_at?: never;
+  })
+  | {
+    readonly finalization_started_at: string;
+    readonly finalization_ended_at: string;
+    readonly executor_started_at?: never;
+    readonly executor_ended_at?: never;
+  };
 export interface ControlledTaskView {
   readonly taskId: Id;
   readonly state: ControlledTaskState;
@@ -86,7 +93,7 @@ type NonTerminalTaskRecord = Extract<TaskRecord, { state: "queued" | "running" }
 type InteractiveRecord = {
   state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
   executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
-  partialOutput?: string | undefined; error?: SerializedError | undefined;
+  partialOutput?: string | undefined; diagnostics?: ExecutorDiagnostics | undefined; error?: SerializedError | undefined;
 };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
@@ -243,7 +250,8 @@ export class RegisteredWorkspaceTaskService {
       state: record.state,
       executor: record.request.executor,
       evidence: record.evidence,
-      ...(record.threadId === undefined ? {} : { threadId: record.threadId })
+      ...(record.threadId === undefined ? {} : { threadId: record.threadId }),
+      ...(record.diagnostics === undefined ? {} : { diagnostics: record.diagnostics })
     };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
     if (record.state === "waiting_for_supervisor_review") return { ...base, ready: true, review_output: record.output };
@@ -281,6 +289,7 @@ export class RegisteredWorkspaceTaskService {
     } else if (action === "continue") {
       if (record.state !== "waiting_for_supervisor_review" || !instruction?.trim()) throw new CoreError("INVALID_STATE_TRANSITION");
       record.request = { ...record.request, instruction };
+      record.diagnostics = undefined;
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
     } else if (action === "steer") {
@@ -349,7 +358,11 @@ export class RegisteredWorkspaceTaskService {
         record.output = undefined;
         record.state = "failed";
         record.error = interruptedError();
-      } else { record.state = "waiting_for_supervisor_review"; record.output = result.output; }
+      } else {
+        record.diagnostics = result.diagnostics;
+        record.state = "waiting_for_supervisor_review";
+        record.output = result.output;
+      }
       if (record.state === "failed") this.recordInteractiveTerminalTask(taskId);
     } catch (error) {
       record.executor = undefined;

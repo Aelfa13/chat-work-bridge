@@ -418,6 +418,55 @@ test("an interrupted interactive task without any partial output omits the field
   });
 });
 
+test("failed and interrupted interactive results do not expose executor diagnostics", async () => {
+  const results: ExecutorResult[] = [
+    {
+      kind: "failed",
+      error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." },
+      diagnostics: {
+        executor_started_at: "2026-08-27T01:02:03.004Z",
+        executor_ended_at: "2026-08-27T01:02:04.005Z"
+      }
+    },
+    {
+      kind: "interrupted",
+      output: "partial",
+      diagnostics: {
+        executor_started_at: "2026-08-27T01:02:03.004Z",
+        executor_ended_at: "2026-08-27T01:02:04.005Z"
+      }
+    }
+  ];
+
+  for (const result of results) {
+    let firstRun = true;
+    const executor: Executor = {
+      execute: async () => {
+        if (!firstRun) return result;
+        firstRun = false;
+        return {
+          kind: "completed",
+          output: "review",
+          diagnostics: {
+            executor_started_at: "2026-08-27T01:02:01.002Z",
+            executor_ended_at: "2026-08-27T01:02:02.003Z"
+          }
+        };
+      }
+    };
+    const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+    const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+    await waitForInteractiveReady(service, taskId);
+    await service.controlTask(taskId, "continue", "retry");
+    await waitForInteractiveReady(service, taskId);
+
+    const view = service.taskView(taskId);
+    assert.equal(view?.state, "failed");
+    assert.equal("diagnostics" in (view ?? {}), false, result.kind);
+  }
+});
+
 test("run_task interrupt reaches TASK_INTERRUPTED after bounded DSH TERM and KILL without close", async () => {
   const signals: string[] = [];
   const service = new RegisteredWorkspaceTaskService(registry(), (executor, workspaceRoot) => {
@@ -580,6 +629,39 @@ test("taskView exposes the native Codex thread id once one exists and keeps it a
   await service.controlTask(taskId, "accept");
   assert.equal(service.taskView(taskId)?.executor, "codex");
   assert.equal(service.taskView(taskId)?.threadId, "thread-1");
+});
+
+test("interactive taskView preserves executor diagnostics through supervisor accept", async () => {
+  const executor: Executor = {
+    execute: async () => ({
+      kind: "completed",
+      output: "done",
+      diagnostics: {
+        executor_started_at: "2026-08-27T01:02:03.004Z",
+        executor_ended_at: "2026-08-27T01:02:04.005Z"
+      }
+    })
+  };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.startTask({ workspace_id: "known", instruction: "inspect" });
+
+  await waitForInteractiveReady(service, taskId);
+
+  const reviewView = service.taskView(taskId);
+  assert.equal(reviewView?.state, "waiting_for_supervisor_review");
+  assert.deepEqual(reviewView?.diagnostics, {
+    executor_started_at: "2026-08-27T01:02:03.004Z",
+    executor_ended_at: "2026-08-27T01:02:04.005Z"
+  });
+
+  await service.controlTask(taskId, "accept");
+
+  const completedView = service.taskView(taskId);
+  assert.equal(completedView?.state, "completed");
+  assert.deepEqual(completedView?.diagnostics, {
+    executor_started_at: "2026-08-27T01:02:03.004Z",
+    executor_ended_at: "2026-08-27T01:02:04.005Z"
+  });
 });
 
 test("continue preserves the same native Codex thread id and passes it to the resumed turn", async () => {
