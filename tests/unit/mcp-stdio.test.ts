@@ -663,6 +663,15 @@ index 90be1f3..3b18e51 100644
     assert.equal("executor" in view.body, false);
     assert.equal(view.body.output, validPatch);
 
+    const taskView = { ...view.body };
+    delete taskView.mcp_diagnostics;
+    const mcpDiagnostics = view.body.mcp_diagnostics as { serialized_task_view_bytes?: unknown } | undefined;
+    assert.equal(
+      mcpDiagnostics?.serialized_task_view_bytes,
+      Buffer.byteLength(JSON.stringify(taskView), "utf8")
+    );
+    assert.equal(JSON.stringify(view.body.mcp_diagnostics).includes(validPatch), false);
+
     // A stale base_head is rejected with the structured preflight error.
     const stale = await call("submit_controlled_patch", {
       workspace_id: "workspace",

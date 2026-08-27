@@ -33,6 +33,7 @@ interface Invocation {
   stdin: string;
   signals: string[];
   send(message: unknown): void;
+  writeStdout(text: string): void;
   error(): void;
   exit(code: number | null): void;
   close(code: number | null): void;
@@ -60,6 +61,7 @@ function fakeStarter(behavior: FakeBehavior, invocations: Invocation[]): Process
     const invocation: Invocation = {
       executable, args: [...args], options, stdin: "", signals: [],
       send(message) { stdout.write(`${JSON.stringify(message)}\n`); },
+      writeStdout(text) { stdout.write(text); },
       error() { child.emit("error", new Error("late child error")); },
       exit(code) { child.emit("exit", code, null); },
       close(code) {
@@ -802,6 +804,75 @@ test("reports evidence evicted by the count limit through an in-budget synthetic
   assert.equal(emissions[54]?.length, 50);
   assert.equal(emissions[54]?.[0]?.id, "cmd-7");
   assert.equal(emissions[54]?.[49]?.id, "evidence-drop");
+});
+
+test("bounds Codex diagnostic evidence by aggregate serialized UTF-8 bytes and retains a drop marker", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ appServerOutput: "", autoComplete: false }, invocations));
+  const pending = executor.execute({ taskId: TASK_ID, instruction: "x" });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  for (let index = 0; index < 50; index += 1) {
+    invocation.send({
+      method: "item/completed",
+      params: {
+        item: {
+          id: `cmd-${index}`,
+          type: "commandExecution",
+          status: "completed",
+          command: `${"命令".repeat(4_000)}-${index}`
+        }
+      }
+    });
+  }
+  invocation.send({ method: "turn/completed", params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } } });
+
+  const result = await pending;
+  const evidence = result.evidence ?? [];
+  assert.ok(Buffer.byteLength(JSON.stringify(evidence), "utf8") <= 65_536);
+  assert.equal(evidence.some(({ id }) => id === "evidence-drop"), true);
+});
+
+test("fails promptly with bounded diagnostics for an overlong unterminated Codex JSONL line", async () => {
+  const invocations: Invocation[] = [];
+  const secret = "secret-protocol-body";
+  const executor = timedExecutor(fakeStarter({ hold: true }, invocations), process.platform, {
+    ...SHORT_TIMING,
+    executionTimeoutMs: 1_000,
+    protocolInactivityTimeoutMs: 1_000,
+    rpcCallTimeoutMs: 1_000
+  });
+  const pending = settlesWithin(executor.execute({ taskId: TASK_ID, instruction: "x" }));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const invocation = invocations[0];
+  assert.ok(invocation);
+
+  invocation.writeStdout("x".repeat(40_000));
+  invocation.writeStdout(`${"y".repeat(40_000)}${secret}`);
+
+  const result = await pending;
+  assert.equal(result.kind, "failed");
+  if (result.kind !== "failed") return;
+  assert.equal(result.error.code, "CODEX_PROTOCOL_ERROR");
+  assert.ok(JSON.stringify(result).length <= 2_048);
+  assert.equal(JSON.stringify(result).includes(secret), false);
+});
+
+test("exposes only executor start/end timing metadata in structured diagnostics", async () => {
+  const invocations: Invocation[] = [];
+  const executor = timedExecutor(fakeStarter({ appServerOutput: "done" }, invocations));
+
+  const result = await executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+  const diagnostics = (result as unknown as {
+    diagnostics?: { executor_started_at?: unknown; executor_ended_at?: unknown; instruction?: unknown; output?: unknown; protocol?: unknown }
+  }).diagnostics;
+  assert.equal(typeof diagnostics?.executor_started_at, "string");
+  assert.equal(typeof diagnostics?.executor_ended_at, "string");
+  assert.equal("instruction" in (diagnostics ?? {}), false);
+  assert.equal("output" in (diagnostics ?? {}), false);
+  assert.equal("protocol" in (diagnostics ?? {}), false);
 });
 
 test("passes untruncated evidence through unchanged", async () => {

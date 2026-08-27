@@ -189,6 +189,37 @@ test("awaits a terminal handler exactly once before exposing completed output", 
   });
 });
 
+test("exposes finalization start/end timing around the terminal handler without bodies", async () => {
+  const handlerStarted = deferred<void>();
+  const releaseHandler = deferred<void>();
+  const executor: Executor = { execute: async () => ({ kind: "completed", output: "secret output" }) };
+  const service = new RegisteredWorkspaceTaskService(registry(), () => executor);
+  const { taskId } = service.runTask(
+    { workspace_id: "known", instruction: "secret instruction" },
+    undefined,
+    async () => {
+      handlerStarted.resolve();
+      await releaseHandler.promise;
+    }
+  );
+
+  await handlerStarted.promise;
+  const beforeFinalization = service.taskView(taskId) as Record<string, unknown> | undefined;
+  assert.equal(beforeFinalization?.state, "running");
+  releaseHandler.resolve();
+  await waitForTerminal(service, taskId);
+
+  const view = service.taskView(taskId) as (Record<string, unknown> & {
+    diagnostics?: Record<string, unknown>
+  }) | undefined;
+  const diagnostics = view?.diagnostics;
+  assert.equal(typeof diagnostics?.finalization_started_at, "string");
+  assert.equal(typeof diagnostics?.finalization_ended_at, "string");
+  assert.equal("instruction" in (diagnostics ?? {}), false);
+  assert.equal("output" in (diagnostics ?? {}), false);
+  assert.equal("protocol" in (diagnostics ?? {}), false);
+});
+
 test("records INTERNAL_ERROR exactly once when a terminal handler throws", async () => {
   const release = deferred<void>();
   const handlerStarted = deferred<void>();
