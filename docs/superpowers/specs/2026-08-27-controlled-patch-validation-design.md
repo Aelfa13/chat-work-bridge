@@ -104,6 +104,8 @@ patch_task_id
   -> return one structured report
 ```
 
+In v1, `validate_controlled_patch` does not support retained proposals whose `base_head` is absent or null. It must return `INCOMPLETE` with reason `unsupported_unborn_base` before creating any temporary worktree or executing any configured command.
+
 All configured commands execute with the temporary worktree as their working directory. Program and arguments are passed through a `spawn`/`execFile`-style API with shell execution disabled. Shell metacharacters inside an argument remain literal arguments.
 
 No preparation or validation command runs until proposal resolution, profile lookup, and the existing preflight succeed. Failure to create the worktree or apply the already-preflighted patch is an incomplete validation, not permission to fall back to the registered workspace.
