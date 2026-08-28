@@ -1,27 +1,29 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
 import { CoreError } from "../../../src/core/errors.js";
-import type {
+import {
   ControlledPatchService,
-  ControlledPatchValidationProposal
+  type ControlledPatchValidationProposal
 } from "../../../src/tasks/controlled-patch-service.js";
 import {
   ControlledPatchValidationService
 } from "../../../src/tasks/controlled-patch-validation-service.js";
+import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
 import type {
   ValidationProfile,
   ValidationProfileStore
 } from "../../../src/tasks/validation-profile-store.js";
-import type {
-  ValidationProcessOutcome,
-  ValidationProcessRequest,
-  ValidationProcessRunner
+import {
+  ValidationProcessRunner,
+  type ValidationProcessOutcome,
+  type ValidationProcessRequest
 } from "../../../src/tasks/validation-process-runner.js";
-import type { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
+import { RegisteredWorkspaceRegistry } from "../../../src/workspaces/registered-workspace-registry.js";
 
 const COMMIT_PROPOSAL: ControlledPatchValidationProposal = {
   workspaceId: "workspace-a",
@@ -42,6 +44,15 @@ const UNBORN_PROPOSAL: ControlledPatchValidationProposal = {
   ...COMMIT_PROPOSAL,
   baseHead: null
 };
+
+const REAL_PATCH = `diff --git a/note.txt b/note.txt
+index 90be1f3..3b18e51 100644
+--- a/note.txt
++++ b/note.txt
+@@ -1 +1 @@
+-before
++after
+`;
 
 const PROFILE: ValidationProfile = {
   preparation: [
@@ -103,6 +114,10 @@ class FakeValidationProcessRunner {
     readonly outcome: ValidationProcessOutcome;
   }> = [];
 
+  constructor(
+    private readonly fallback?: ValidationProcessRunner
+  ) {}
+
   async run(request: ValidationProcessRequest): Promise<ValidationProcessOutcome> {
     this.invocations.push(request);
     const key = request.argv.join(" ");
@@ -113,7 +128,13 @@ class FakeValidationProcessRunner {
     const prefixMatch = this.prefixOverrides.find((entry) =>
       key.startsWith(entry.prefix)
     );
-    return prefixMatch?.outcome ?? DEFAULT_OUTCOME;
+    if (prefixMatch !== undefined) {
+      return prefixMatch.outcome;
+    }
+    if (this.fallback !== undefined) {
+      return this.fallback.run(request);
+    }
+    return DEFAULT_OUTCOME;
   }
 }
 
@@ -170,6 +191,122 @@ function makeHarness(options: {
   return { service, patches, store, runner, tempParent };
 }
 
+function git(root: string, ...args: string[]): string {
+  return execFileSync("git", args, { cwd: root, encoding: "utf8" });
+}
+
+function repository(): string {
+  const root = realpathSync(
+    mkdtempSync(join(tmpdir(), "engineering-bridge-validation-repo-"))
+  );
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "Test User");
+  git(root, "config", "user.email", "test@example.invalid");
+  writeFileSync(join(root, "note.txt"), "before\n");
+  git(root, "add", "note.txt");
+  git(root, "commit", "-qm", "base");
+  return root;
+}
+
+function realProfile(
+  validation: ValidationProfile["validation"]
+): ValidationProfile {
+  return {
+    preparation: [],
+    validation,
+    defaultStepTimeoutSeconds: 30,
+    totalTimeoutSeconds: 60
+  };
+}
+
+async function makeRealValidationHarness(
+  profile: ValidationProfile,
+  runner: ValidationProcessRunner | FakeValidationProcessRunner =
+    new ValidationProcessRunner()
+) {
+  const root = repository();
+  const stateParent = mkdtempSync(
+    join(tmpdir(), "engineering-bridge-validation-state-")
+  );
+  const stateFilePath = join(stateParent, "controlled-patches.json");
+  const registry = new RegisteredWorkspaceRegistry([
+    { id: "workspace", root }
+  ]);
+  const tasks = new RegisteredWorkspaceTaskService(registry, () => ({
+    execute: async () => {
+      throw new Error("submitted proposals must not execute");
+    }
+  }));
+  const patches = new ControlledPatchService(
+    registry,
+    tasks,
+    undefined,
+    stateFilePath
+  );
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const submitted = await patches.submit({
+    workspace_id: "workspace",
+    base_head: head,
+    diff: REAL_PATCH
+  });
+  const store = new FakeProfileStore(profile);
+  const tempParent = makeTempParent();
+  const service = new ControlledPatchValidationService(
+    registry,
+    patches,
+    store as unknown as ValidationProfileStore,
+    runner as unknown as ValidationProcessRunner,
+    undefined,
+    tempParent
+  );
+  return {
+    root,
+    stateParent,
+    stateFilePath,
+    tasks,
+    patches,
+    patchTaskId: submitted.taskId,
+    tempParent,
+    service,
+    proposalBefore: patches.validationProposal(submitted.taskId),
+    taskBefore: tasks.taskView(submitted.taskId),
+    retainedStateBefore: readFileSync(stateFilePath, "utf8")
+  };
+}
+
+type RealValidationHarness = Awaited<
+  ReturnType<typeof makeRealValidationHarness>
+>;
+
+function assertRealValidationPreserved(
+  harness: RealValidationHarness
+): void {
+  assert.equal(readFileSync(join(harness.root, "note.txt"), "utf8"), "before\n");
+  assert.equal(existsSync(join(harness.root, "validation-artifact.txt")), false);
+  assert.equal(git(harness.root, "status", "--short"), "");
+  assert.deepEqual(
+    harness.patches.validationProposal(harness.patchTaskId),
+    harness.proposalBefore
+  );
+  assert.deepEqual(harness.tasks.taskView(harness.patchTaskId), harness.taskBefore);
+  assert.equal(
+    readFileSync(harness.stateFilePath, "utf8"),
+    harness.retainedStateBefore
+  );
+  assert.equal(harness.tempParent.created.length, 1);
+  assert.equal(existsSync(harness.tempParent.created[0]!), false);
+  const worktrees = git(harness.root, "worktree", "list", "--porcelain");
+  assert.equal(worktrees.match(/^worktree /gm)?.length ?? 0, 1);
+}
+
+function cleanupRealValidationHarness(harness: RealValidationHarness): void {
+  for (const temporaryParent of harness.tempParent.created) {
+    rmSync(temporaryParent, { recursive: true, force: true });
+  }
+  rmSync(harness.stateParent, { recursive: true, force: true });
+  rmSync(harness.root, { recursive: true, force: true });
+}
+
 test("validate is INCOMPLETE with validation_profile_missing when no profile exists, without starting processes or temp state", async () => {
   const harness = makeHarness({ proposal: COMMIT_PROPOSAL, profile: undefined });
 
@@ -212,6 +349,95 @@ test("validate is INCOMPLETE with preflight_failed when the shared preflight fai
   assert.equal(harness.runner.invocations.length, 0);
   assert.equal(harness.tempParent.created.length, 0);
 });
+
+for (const [name, outcome] of [
+  [
+    "nonzero exit",
+    {
+      kind: "exit",
+      exitCode: 2,
+      durationMs: 1,
+      outputTail: "worktree add failed"
+    }
+  ],
+  [
+    "timeout",
+    { kind: "timeout", durationMs: 1, outputTail: "" }
+  ],
+  [
+    "spawn error",
+    { kind: "spawn_error", durationMs: 1, outputTail: "" }
+  ],
+  [
+    "signal",
+    { kind: "signal", durationMs: 1, outputTail: "" }
+  ]
+] as const satisfies ReadonlyArray<
+  readonly [string, ValidationProcessOutcome]
+>) {
+  test(`worktree creation ${name} starts no configured preparation or validation command`, async () => {
+    const harness = makeHarness({
+      proposal: COMMIT_PROPOSAL,
+      profile: PROFILE
+    });
+    harness.runner.prefixOverrides.push({
+      prefix: "git -C /workspaces/workspace-a worktree add --detach",
+      outcome
+    });
+
+    const report = await harness.service.validate("task-1");
+
+    assert.equal(report.status, "INCOMPLETE");
+    assert.equal(
+      harness.runner.invocations.some(({ argv }) => argv[0] === "npm"),
+      false
+    );
+  });
+}
+
+for (const [name, outcome] of [
+  [
+    "nonzero exit",
+    {
+      kind: "exit",
+      exitCode: 1,
+      durationMs: 1,
+      outputTail: "patch does not apply"
+    }
+  ],
+  [
+    "timeout",
+    { kind: "timeout", durationMs: 1, outputTail: "" }
+  ],
+  [
+    "spawn error",
+    { kind: "spawn_error", durationMs: 1, outputTail: "" }
+  ],
+  [
+    "signal",
+    { kind: "signal", durationMs: 1, outputTail: "" }
+  ]
+] as const satisfies ReadonlyArray<
+  readonly [string, ValidationProcessOutcome]
+>) {
+  test(`candidate apply ${name} starts no configured preparation or validation command`, async () => {
+    const harness = makeHarness({
+      proposal: COMMIT_PROPOSAL,
+      profile: PROFILE,
+      runnerOverrides: new Map([
+        ["git apply --recount --unidiff-zero", outcome]
+      ])
+    });
+
+    const report = await harness.service.validate("task-1");
+
+    assert.equal(report.status, "INCOMPLETE");
+    assert.equal(
+      harness.runner.invocations.some(({ argv }) => argv[0] === "npm"),
+      false
+    );
+  });
+}
 
 test("validate is FAIL when a preparation step exits nonzero and later configured steps are not started", async () => {
   const harness = makeHarness({
@@ -486,4 +712,87 @@ test("validate caps each configured step timeout at min(step timeout, remaining 
   assert.equal(byArgv.get("npm run build")?.timeoutMs, 500_000);
   assert.equal(byArgv.get("npm test")?.timeoutMs, 90_000);
   assert.equal(byArgv.get("npm run lint")?.timeoutMs, 500_000);
+});
+
+test("real Git validation uses a detached temporary worktree, isolates candidate changes and artifacts, and cleans up after PASS", async (t) => {
+  const inspectAndCreateArtifact = [
+    "const fs=require('node:fs');",
+    "const cp=require('node:child_process');",
+    "const detached=cp.spawnSync('git',['symbolic-ref','-q','HEAD'],",
+    "{stdio:'ignore'}).status===1;",
+    "if(!detached||fs.readFileSync('note.txt','utf8')!=='after\\n')",
+    "process.exit(1);",
+    "fs.writeFileSync('validation-artifact.txt','ok\\n');"
+  ].join("");
+  const harness = await makeRealValidationHarness(realProfile([
+    {
+      name: "inspect-isolation",
+      argv: [process.execPath, "-e", inspectAndCreateArtifact]
+    }
+  ]));
+  t.after(() => cleanupRealValidationHarness(harness));
+
+  const report = await harness.service.validate(harness.patchTaskId);
+
+  assert.equal(report.status, "PASS");
+  assert.equal(report.cleanup, "success");
+  assert.deepEqual(
+    report.steps.map(({ name, status }) => [name, status]),
+    [["inspect-isolation", "PASS"]]
+  );
+  assertRealValidationPreserved(harness);
+});
+
+test("real Git validation removes the temporary worktree after FAIL without changing the retained proposal or registered workspace", async (t) => {
+  const harness = await makeRealValidationHarness(realProfile([
+    {
+      name: "fail",
+      argv: [process.execPath, "-e", "process.exit(7)"]
+    }
+  ]));
+  t.after(() => cleanupRealValidationHarness(harness));
+
+  const report = await harness.service.validate(harness.patchTaskId);
+
+  assert.equal(report.status, "FAIL");
+  assert.equal(report.cleanup, "success");
+  assert.equal(report.steps[0]?.status, "FAIL");
+  assert.equal(report.steps[0]?.exit_code, 7);
+  assertRealValidationPreserved(harness);
+});
+
+test("real Git validation removes the temporary worktree after timeout/INCOMPLETE without changing the retained proposal or registered workspace", async (t) => {
+  const timeoutCommand: readonly [string, ...string[]] = [
+    process.execPath,
+    "-e",
+    "void 0"
+  ];
+  const runner = new FakeValidationProcessRunner(
+    new ValidationProcessRunner()
+  );
+  runner.overrides.set(timeoutCommand.join(" "), {
+    kind: "timeout",
+    durationMs: 30_000,
+    outputTail: "validation timed out"
+  });
+  const harness = await makeRealValidationHarness(
+    realProfile([
+      {
+        name: "timeout",
+        argv: timeoutCommand,
+        timeoutSeconds: 30
+      }
+    ]),
+    runner
+  );
+  t.after(() => cleanupRealValidationHarness(harness));
+
+  const report = await harness.service.validate(harness.patchTaskId);
+
+  assert.equal(report.status, "INCOMPLETE");
+  assert.equal(report.cleanup, "success");
+  assert.equal(report.steps[0]?.status, "INCOMPLETE");
+  assert.equal(report.steps[0]?.duration_ms, 30_000);
+  assert.equal(report.steps[0]?.output_tail, "validation timed out");
+  assertRealValidationPreserved(harness);
 });
