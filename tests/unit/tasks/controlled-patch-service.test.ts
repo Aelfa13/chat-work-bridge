@@ -2474,3 +2474,137 @@ test("recovers applying as recovery_conflict when both apply directions fail and
     "INVALID_STATE_TRANSITION"
   );
 });
+
+test("validation adapters expose a retained commit proposal without mutating state or APPLY eligibility", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  const head = git(root, "rev-parse", "HEAD").trim();
+  const taskId = retainedTaskId(1);
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [retainedRecord(taskId, root, head)]
+  });
+  const current = fixture(
+    root,
+    async () => { throw new Error("retained tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await current.controlled.load();
+  const expected = {
+    workspaceId: "workspace",
+    workspaceRoot: root,
+    baseHead: head,
+    patch: validPatch
+  };
+  const retainedBefore = readFileSync(stateFilePath, "utf8");
+  const taskBefore = current.tasks.taskView(taskId);
+
+  assert.deepEqual(current.controlled.validationProposal(taskId), expected);
+  assert.deepEqual(await current.controlled.preflightValidationProposal(taskId), expected);
+  assert.equal(readFileSync(stateFilePath, "utf8"), retainedBefore);
+  assert.deepEqual(current.tasks.taskView(taskId), taskBefore);
+
+  const applied = await current.controlled.apply({
+    patch_task_id: taskId,
+    confirmation: "APPLY"
+  });
+  assert.equal(applied.applied, true);
+});
+
+test("validationProposal exposes a retained unborn proposal with a null base HEAD", async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-bridge-unborn-")));
+  git(root, "init", "-q");
+  const stateFilePath = retainedStateFile();
+  const taskId = retainedTaskId(1);
+  writeRetainedState(stateFilePath, {
+    version: 1,
+    applied_task_ids: [],
+    proposals: [
+      retainedRecord(taskId, root, "", {
+        base_head: null,
+        unborn: true,
+        output: additionPatch
+      })
+    ]
+  });
+  const current = fixture(
+    root,
+    async () => { throw new Error("retained tasks must not execute"); },
+    undefined,
+    stateFilePath
+  );
+  await current.controlled.load();
+
+  assert.deepEqual(current.controlled.validationProposal(taskId), {
+    workspaceId: "workspace",
+    workspaceRoot: root,
+    baseHead: null,
+    patch: additionPatch
+  });
+});
+
+test("validation adapters reject unknown and not-yet-retained proposals with the safe state error", async () => {
+  const root = repository();
+  let finish!: (result: ExecutorResult) => void;
+  const pending = new Promise<ExecutorResult>((done) => { finish = done; });
+  const current = fixture(root, () => pending, undefined, retainedStateFile());
+  const generated = await current.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "change note"
+  });
+  await Promise.resolve();
+
+  for (const taskId of [retainedTaskId(999), generated.taskId]) {
+    assert.throws(
+      () => current.controlled.validationProposal(taskId),
+      (error: unknown) => error instanceof CoreError && error.code === "INVALID_STATE_TRANSITION"
+    );
+    await expectCode(
+      () => current.controlled.preflightValidationProposal(taskId),
+      "INVALID_STATE_TRANSITION"
+    );
+  }
+
+  finish({
+    kind: "failed",
+    error: { code: "CODEX_EXECUTION_FAILED", message: "Codex execution failed." }
+  });
+  await terminal(current.tasks, generated.taskId);
+});
+
+test("preflightValidationProposal rejects worktree and HEAD drift through controlled-patch preflight", async () => {
+  for (const drift of ["worktree", "head"] as const) {
+    const root = repository();
+    const stateFilePath = retainedStateFile();
+    const head = git(root, "rev-parse", "HEAD").trim();
+    const taskId = retainedTaskId(1);
+    writeRetainedState(stateFilePath, {
+      version: 1,
+      applied_task_ids: [],
+      proposals: [retainedRecord(taskId, root, head)]
+    });
+    const current = fixture(
+      root,
+      async () => { throw new Error("retained tasks must not execute"); },
+      undefined,
+      stateFilePath
+    );
+    await current.controlled.load();
+
+    if (drift === "worktree") {
+      writeFileSync(join(root, "note.txt"), "dirty\n");
+    } else {
+      writeFileSync(join(root, "other.txt"), "commit\n");
+      git(root, "add", "other.txt");
+      git(root, "commit", "-qm", "move head");
+    }
+
+    assert.equal(current.controlled.validationProposal(taskId).baseHead, head);
+    await expectCode(
+      () => current.controlled.preflightValidationProposal(taskId),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  }
+});
