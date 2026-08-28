@@ -25,6 +25,13 @@ export type ProposalBase =
   | { readonly kind: "commit"; readonly head: string }
   | { readonly kind: "unborn" };
 
+export interface ControlledPatchValidationProposal {
+  readonly workspaceId: string;
+  readonly workspaceRoot: string;
+  readonly baseHead: string | null;
+  readonly patch: string;
+}
+
 type Proposal = {
   workspaceId: string;
   workspaceRoot: string;
@@ -219,6 +226,28 @@ export class ControlledPatchService {
       throw error;
     }
     return { taskId, baseHead: base.head };
+  }
+
+  validationProposal(patchTaskId: string): ControlledPatchValidationProposal {
+    const proposal = this.proposals.get(patchTaskId as Id);
+    const result = this.tasks.result(patchTaskId);
+    if (proposal === undefined || result === undefined || result.state !== "completed") {
+      throw new CoreError("INVALID_STATE_TRANSITION");
+    }
+
+    return {
+      workspaceId: proposal.workspaceId,
+      workspaceRoot: proposal.workspaceRoot,
+      baseHead: proposal.base.kind === "commit" ? proposal.base.head : null,
+      patch: result.output
+    };
+  }
+
+  async preflightValidationProposal(patchTaskId: string): Promise<ControlledPatchValidationProposal> {
+    const validationProposal = this.validationProposal(patchTaskId);
+    const proposal = this.proposals.get(patchTaskId as Id)!;
+    await this.preflightPatch(proposal.workspaceRoot, proposal.base, validationProposal.patch);
+    return validationProposal;
   }
 
   async apply(request: { patch_task_id: string; confirmation: string }): Promise<{
