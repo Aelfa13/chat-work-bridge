@@ -234,6 +234,26 @@ test("retains only the byte-bounded tail of combined stdout and stderr", async (
   assert.equal(outcome.outputTail, `${"a".repeat(25_536)}${"b".repeat(40_000)}`);
 });
 
+test("drops an incomplete trailing UTF-8 sequence without expanding the byte-bounded tail", async () => {
+  const child = fakeChild();
+  const runner = new ValidationProcessRunner(
+    starterFor(child, []),
+    new ManualTimer()
+  );
+
+  const result = runner.run(request(["validator"]));
+  child.writeStdout(Buffer.concat([
+    Buffer.alloc(65_535, 0x61),
+    Buffer.from([0xe2])
+  ]));
+  child.close(0);
+
+  const outcome = await result;
+  assert.equal(outcome.kind, "exit");
+  assert.ok(Buffer.byteLength(outcome.outputTail) <= 65_536);
+  assert.equal(outcome.outputTail.endsWith("\ufffd"), false);
+});
+
 test("kills the child and returns timeout when the deadline fires", async () => {
   const child = fakeChild();
   const timers = new ManualTimer();
@@ -252,6 +272,67 @@ test("kills the child and returns timeout when the deadline fires", async () => 
     kind: "timeout",
     durationMs: 250,
     outputTail: "before timeout"
+  });
+  assert.equal(child.killSignals.length, 1);
+});
+
+test("returns timeout when kill synchronously closes the child", async () => {
+  const child = fakeChild();
+  const timers = new ManualTimer();
+  timers.currentMs = 100;
+  const runner = new ValidationProcessRunner(starterFor(child, []), timers);
+
+  child.process.kill = (
+    signal?: NodeJS.Signals | number
+  ): boolean => {
+    child.killSignals.push(signal);
+    child.close(null, "SIGTERM");
+    return true;
+  };
+
+  const result = runner.run({
+    ...request(["validator"]),
+    timeoutMs: 200
+  });
+  child.writeStdout("before timeout");
+  timers.currentMs = 350;
+
+  assert.equal(timers.fireNext(), 200);
+  assert.deepEqual(await result, {
+    kind: "timeout",
+    durationMs: 250,
+    outputTail: "before timeout"
+  });
+  child.error();
+  child.close(0);
+  assert.equal(timers.clearCount, 1);
+});
+
+test("returns timeout without throwing when kill throws", async () => {
+  const child = fakeChild();
+  const timers = new ManualTimer();
+  timers.currentMs = 10;
+  const runner = new ValidationProcessRunner(starterFor(child, []), timers);
+
+  child.process.kill = (
+    signal?: NodeJS.Signals | number
+  ): boolean => {
+    child.killSignals.push(signal);
+    throw new Error("kill failed");
+  };
+
+  const result = runner.run({
+    ...request(["validator"]),
+    timeoutMs: 50
+  });
+  child.writeStderr("before failed kill");
+  timers.currentMs = 60;
+
+  assert.doesNotThrow(() => timers.fireNext());
+  assert.deepEqual(await result, {
+    kind: "timeout",
+    durationMs: 50,
+    outputTail: "before failed kill"
   });
   assert.equal(child.killSignals.length, 1);
 });
