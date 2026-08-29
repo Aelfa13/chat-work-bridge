@@ -14,7 +14,7 @@ export type ValidationProcessOutcome =
       readonly outputTail: string;
     }
   | {
-      readonly kind: "timeout" | "spawn_error" | "signal";
+      readonly kind: "timeout" | "spawn_error" | "signal" | "termination_error";
       readonly durationMs: number;
       readonly outputTail: string;
     };

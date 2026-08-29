@@ -353,6 +353,56 @@ test("does not return timeout until the child closes when kill throws", async ()
   });
 });
 
+for (const killBehavior of [
+  { name: "throws", throws: true },
+  { name: "reports signal delivery", throws: false }
+] as const) {
+  test(
+    `bounds timeout termination when kill ${killBehavior.name} but the child never closes`,
+    async () => {
+      const child = fakeChild();
+      const timers = new ManualTimer();
+      timers.currentMs = 10;
+      const runner = new ValidationProcessRunner(starterFor(child, []), timers);
+
+      child.process.kill = (
+        signal?: NodeJS.Signals | number
+      ): boolean => {
+        child.killSignals.push(signal);
+        if (killBehavior.throws) {
+          throw new Error("kill failed");
+        }
+        return true;
+      };
+
+      const result = runner.run({
+        ...request(["validator"]),
+        timeoutMs: 50
+      });
+      let settled = false;
+      void result.then(() => {
+        settled = true;
+      });
+      child.writeStderr("before stalled termination");
+      timers.currentMs = 60;
+
+      assert.doesNotThrow(() => timers.fireNext());
+      await Promise.resolve();
+      assert.equal(settled, false);
+      assert.equal(child.killSignals.length, 1);
+      assert.equal(timers.pending.size, 1);
+
+      timers.currentMs = 1_060;
+      timers.fireNext();
+      assert.deepEqual(await result, {
+        kind: "termination_error",
+        durationMs: 1_050,
+        outputTail: "before stalled termination"
+      });
+    }
+  );
+}
+
 test("returns spawn_error when the child errors before close", async () => {
   const child = fakeChild();
   const timers = new ManualTimer();
