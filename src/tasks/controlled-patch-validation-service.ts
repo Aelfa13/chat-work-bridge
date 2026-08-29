@@ -303,9 +303,11 @@ export class ControlledPatchValidationService {
     temporaryParent: string
   ): Promise<"success" | "failed"> {
     let deadlineHandle: NodeJS.Timeout | undefined;
+    let deadlineExpired = false;
     const deadline = new Promise<"failed">((resolve) => {
       deadlineHandle = this.cleanupDeadlineTimer.set(() => {
         deadlineHandle = undefined;
+        deadlineExpired = true;
         resolve("failed");
       }, CLEANUP_TIMEOUT_MS);
     });
@@ -329,6 +331,10 @@ export class ControlledPatchValidationService {
         failed = !succeeded(outcome);
       } catch {
         failed = true;
+      }
+
+      if (deadlineExpired) {
+        return "failed";
       }
 
       try {

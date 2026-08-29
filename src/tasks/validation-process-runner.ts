@@ -174,9 +174,11 @@ export class ValidationProcessRunner {
 
       child.stdout.on("data", capture);
       child.stderr.on("data", capture);
-      child.on("error", () =>
-        complete({ kind: timedOut ? "timeout" : "spawn_error" })
-      );
+      child.on("error", () => {
+        if (!timedOut) {
+          complete({ kind: "spawn_error" });
+        }
+      });
       child.on("close", (exitCode) => {
         if (timedOut) {
           complete({ kind: "timeout" });
