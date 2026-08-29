@@ -13,6 +13,13 @@ import { VERSION } from "./version.js";
 import { CoreError, serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
 import { ControlledPatchService } from "./tasks/controlled-patch-service.js";
+import { ControlledPatchValidationService } from "./tasks/controlled-patch-validation-service.js";
+import {
+  type ValidationProfile,
+  type ValidationStep,
+  ValidationProfileStore
+} from "./tasks/validation-profile-store.js";
+import { ValidationProcessRunner } from "./tasks/validation-process-runner.js";
 import { ManagedWorkspaceCatalog } from "./workspaces/managed-workspace-catalog.js";
 import { RegisteredWorkspaceRegistry } from "./workspaces/registered-workspace-registry.js";
 import { WorkspaceOnboardingService } from "./workspaces/workspace-onboarding-service.js";
@@ -30,11 +37,47 @@ const ProjectRootEntrySchema = z.object({
 
 const WorkspaceConfigSchema = z.array(z.union([WorkspaceEntrySchema, ProjectRootEntrySchema]));
 
+const ValidationStepSchema = z.object({
+  name: z.string().min(1),
+  argv: z.array(z.string()).min(1),
+  timeout_seconds: z.number().int().positive().optional()
+}).strict();
+
+const ValidationProfileSchema = z.object({
+  preparation: z.array(ValidationStepSchema),
+  validation: z.array(ValidationStepSchema),
+  default_step_timeout_seconds: z.number().int().positive().optional().default(600),
+  total_timeout_seconds: z.number().int().positive().optional().default(1200)
+}).strict();
+
 type WorkspaceEntry = z.infer<typeof WorkspaceEntrySchema>;
 type ProjectRootEntry = z.infer<typeof ProjectRootEntrySchema>;
 
 function isProjectRootEntry(entry: WorkspaceEntry | ProjectRootEntry): entry is ProjectRootEntry {
   return "kind" in entry;
+}
+
+function toValidationStep(
+  step: z.infer<typeof ValidationStepSchema>
+): ValidationStep {
+  return {
+    name: step.name,
+    argv: [step.argv[0]!, ...step.argv.slice(1)],
+    ...(step.timeout_seconds === undefined
+      ? {}
+      : { timeoutSeconds: step.timeout_seconds })
+  };
+}
+
+function toValidationProfile(
+  profile: z.infer<typeof ValidationProfileSchema>
+): ValidationProfile {
+  return {
+    preparation: profile.preparation.map(toValidationStep),
+    validation: profile.validation.map(toValidationStep),
+    defaultStepTimeoutSeconds: profile.default_step_timeout_seconds,
+    totalTimeoutSeconds: profile.total_timeout_seconds
+  };
 }
 
 function jsonContent(value: unknown) {
@@ -98,6 +141,16 @@ async function main(): Promise<void> {
     `${configPath}.controlled-patches.json`
   );
   await controlledPatches.load();
+  const validationProfiles = new ValidationProfileStore(
+    `${configPath}.validation-profiles.json`
+  );
+  const validationRunner = new ValidationProcessRunner();
+  const validation = new ControlledPatchValidationService(
+    registry,
+    controlledPatches,
+    validationProfiles,
+    validationRunner
+  );
   const server = new McpServer({ name: "engineering-bridge", version: VERSION });
 
   server.registerTool("run_task", {
@@ -279,6 +332,37 @@ async function main(): Promise<void> {
   }, async ({ patch_task_id, confirmation }) => jsonContent(
     await controlledPatches.apply({ patch_task_id, confirmation })
   ));
+
+  server.registerTool("configure_validation_profile", {
+    description: "Configure the fixed validation profile for a registered workspace after exact CONFIGURE confirmation.",
+    inputSchema: z.object({
+      workspace_id: z.string().min(1),
+      profile: ValidationProfileSchema,
+      confirmation: z.literal("CONFIGURE")
+    }).strict()
+  }, async ({ workspace_id, profile }) => {
+    try {
+      return jsonContent(await validation.configure(
+        workspace_id,
+        toValidationProfile(profile)
+      ));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("validate_controlled_patch", {
+    description: "Validate one retained controlled patch with its workspace's configured profile.",
+    inputSchema: z.object({
+      patch_task_id: z.string().min(1)
+    }).strict()
+  }, async ({ patch_task_id }) => {
+    try {
+      return jsonContent(await validation.validate(patch_task_id));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
 
   await server.connect(new StdioServerTransport());
 }
