@@ -769,6 +769,57 @@ test("validate gives the whole cleanup sequence one deadline when parent removal
   assert.equal(report.reason, "cleanup_failed");
 });
 
+test("validate never starts parent removal after the cleanup deadline expires during worktree removal", async () => {
+  const cleanupDeadlineTimer = new ManualCleanupDeadlineTimer();
+  let removeParentCalls = 0;
+  const harness = makeHarness({
+    proposal: COMMIT_PROPOSAL,
+    profile: {
+      ...PROFILE,
+      preparation: [],
+      validation: []
+    },
+    removeParent: async () => {
+      removeParentCalls++;
+    },
+    cleanupDeadlineTimer
+  });
+  let finishWorktreeRemoval:
+    | ((outcome: ValidationProcessOutcome) => void)
+    | undefined;
+  const worktreeRemoval = new Promise<ValidationProcessOutcome>((resolve) => {
+    finishWorktreeRemoval = resolve;
+  });
+  harness.runner.prefixOverrides.push({
+    prefix: "git -C /workspaces/workspace-a worktree remove --force",
+    outcome: worktreeRemoval
+  });
+
+  const validation = harness.service.validate("task-1");
+  const cleanupStarted = () => harness.runner.invocations.some(({ argv }) =>
+    argv.slice(0, 6).join(" ") ===
+      "git -C /workspaces/workspace-a worktree remove --force"
+  );
+  for (let turn = 0; turn < 20 && !cleanupStarted(); turn++) {
+    await Promise.resolve();
+  }
+
+  assert.equal(cleanupStarted(), true);
+  assert.equal(cleanupDeadlineTimer.pendingCount, 1);
+  assert.equal(cleanupDeadlineTimer.setCount, 1);
+  assert.notEqual(finishWorktreeRemoval, undefined);
+  assert.equal(cleanupDeadlineTimer.fire(), 5_000);
+
+  const report = await validation;
+  assert.equal(report.cleanup, "failed");
+
+  finishWorktreeRemoval!(DEFAULT_OUTCOME);
+  for (let turn = 0; turn < 20; turn++) {
+    await Promise.resolve();
+  }
+  assert.equal(removeParentCalls, 0);
+});
+
 test("validate is PASS when preparation, validation, and cleanup all succeed", async () => {
   const harness = makeHarness({ proposal: COMMIT_PROPOSAL, profile: PROFILE });
 

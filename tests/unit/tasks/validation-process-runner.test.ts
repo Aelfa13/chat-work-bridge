@@ -284,6 +284,36 @@ test("does not return timeout until the killed child closes", async () => {
   });
 });
 
+test("does not let a child error after timeout settle the run before close", async () => {
+  const child = fakeChild();
+  const timers = new ManualTimer();
+  timers.currentMs = 100;
+  const runner = new ValidationProcessRunner(starterFor(child, []), timers);
+
+  const result = runner.run({
+    ...request(["validator"]),
+    timeoutMs: 200
+  });
+  let settled = false;
+  void result.then(() => {
+    settled = true;
+  });
+
+  timers.currentMs = 350;
+  assert.equal(timers.fireNext(), 200);
+  child.error();
+
+  await Promise.resolve();
+  assert.equal(settled, false);
+
+  child.close(null);
+  assert.deepEqual(await result, {
+    kind: "timeout",
+    durationMs: 250,
+    outputTail: ""
+  });
+});
+
 test("returns timeout when kill synchronously closes the child", async () => {
   const child = fakeChild();
   const timers = new ManualTimer();
