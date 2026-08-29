@@ -53,7 +53,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **代码审阅：** “检查这段实现的可靠性风险，并给出依据，不要编辑文件。”
 - **受控修改：** “准备一份补丁来调整超时提示；先展示完整 diff，只有我精确回复 `APPLY` 后才写入。”
 
-受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** Bridge 不会自动测试、stage、commit、push 或发布。
+受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** `apply_controlled_patch` 不会自动运行校验或测试，也不会 stage、commit、push 或发布。
 
 ## 为什么通过 Chat 控制本地 Agent？
 
@@ -72,12 +72,13 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 
 | 当前可用 | 当前不会做 | Roadmap——不是当前支持 |
 | --- | --- | --- |
-| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | 不自动测试、stage、commit、push 或创建 Release | workspace GUI/manager |
+| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | APPLY 不自动运行校验/测试，不 stage、commit、push 或创建 Release | workspace GUI/manager |
 | 在 `project_root` 内用精确 `BIND`/`CREATE` 绑定或创建工作区 | 不是 OS 级读取隔离 | 其他 CLI agent 逐个适配 |
 | 写入前生成完整 Git 补丁；managed 工作区经精确 `AUTHORIZE` 后受控写入 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | DSH 原生 headless session resume |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有资源配额 | 持久 task/audit 历史 |
-| 受控补丁提案/应用历史与 managed 工作区目录跨重启保留 | — | 谨慎探索多 agent 编排 |
-| 通过 STDIO 提供十个本地 MCP 工具 | — | — |
+| 每个已登记工作区最多一个固定校验 profile（精确 `CONFIGURE`），对保留提案按需 `validate_controlled_patch`（PASS/FAIL/INCOMPLETE） | 校验不是主机级沙箱；临时 worktree 只隔离已登记工作区 | — |
+| 受控补丁提案/应用历史、managed 工作区目录与 validation profile 跨重启保留 | — | 谨慎探索多 agent 编排 |
+| 通过 STDIO 提供十二个本地 MCP 工具 | — | — |
 
 ## Quick Start
 
@@ -146,7 +147,7 @@ npm run build
 
 使用 DSH 时，若 `DEEPSEEK_API_KEY` 已设置在 Bridge 进程运行时的环境变量中（例如 shell 或启动器环境），Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量。不要把它写进这里的 `env` 覆盖或任何配置文件——密钥不应落入配置。
 
-重新连接集成，并确认能看到以下十个当前 V1 工具：
+重新连接集成，并确认能看到以下十二个当前 V1 工具：
 
 - `run_task`
 - `task_result`
@@ -158,6 +159,8 @@ npm run build
 - `refine_controlled_patch`
 - `submit_controlled_patch`
 - `apply_controlled_patch`
+- `configure_validation_profile`
+- `validate_controlled_patch`
 
 ### 5. 第一次只读任务
 
@@ -197,7 +200,7 @@ git -C /absolute/path/to/my-project status --short
    git -C /absolute/path/to/my-project diff
    ```
 
-6. 运行项目测试，再决定是否 stage、commit、push 和发布。Bridge 不会执行其中任何操作。
+6. 运行项目测试，再决定是否 stage、commit、push 和发布。`apply_controlled_patch` 不会自动运行校验或测试；如需先校验提案，可在 APPLY 前调用 `validate_controlled_patch`（见第 7 节）。
 
 其他位置的 untracked 文件本身不会破坏 tracked state 干净这一要求，但提案中的新增文件目标必须同时不存在于 HEAD、index 和工作树。unborn 仓库（例如 `create_project` 创建的空仓库）支持新增 ordinary 100644 文本文件；Bridge 不会自动 `git add` 或 commit。
 
@@ -211,15 +214,46 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 该进程会等待标准输入中的 MCP 消息。它不是交互式 shell，也不会自行连接聊天客户端。
 
+### 7. 按需校验受控补丁（可选）
+
+校验是可选、按需的：只有显式调用 `validate_controlled_patch` 才会运行校验；`apply_controlled_patch` 不会自动运行校验或测试，`run_task`、generate/refine/submit 与 APPLY 路径也不做任何校验工作，且没有后台校验 worker 或队列。校验不是 APPLY 的前置条件，也不会授权 APPLY 或改变提案/任务状态。
+
+每个已登记工作区最多一个固定的校验 profile（v1 只支持完整替换）。调用 `configure_validation_profile` 时，`confirmation` 必须精确等于 `CONFIGURE`（复用 `AUTHORIZE` 会被拒绝）。profile 由 Bridge 的本地 `<config>.validation-profiles.json` sidecar 管理；命令只通过显式 profile 配置进入，校验调用本身不能携带命令、参数或超时。命令是非空 argv 数组，绝不经过 shell，例如：
+
+```json
+{
+  "workspace_id": "my-project",
+  "confirmation": "CONFIGURE",
+  "profile": {
+    "preparation": [],
+    "validation": [
+      { "name": "test", "argv": ["npm", "test"] }
+    ]
+  }
+}
+```
+
+示例命令仅供说明，Bridge 不会硬编码任何项目命令。省略超时设置时，默认每步 600 秒、总预算 1200 秒；每个步骤也可以固定自己的 `timeout_seconds`。`validate_controlled_patch` 只接受 `patch_task_id`。
+
+校验复用既有受控补丁 preflight，在临时 detached worktree 中按序应用候选补丁并运行 profile 的步骤，返回一个结构化报告：
+
+- `PASS`：所有 preparation/validation 步骤成功且清理成功。
+- `FAIL`：某个已配置步骤确定性地非零退出，后续步骤不再运行。
+- `INCOMPLETE`：profile 缺失、preflight 失败、超时、spawn/信号/基础或清理失败；unborn 仓库提案（`base_head` 为 null）返回 `INCOMPLETE` 且 `reason: "unsupported_unborn_base"`，不会创建临时 worktree 或执行任何命令。
+
+临时 worktree 隔离保护已登记工作区的整洁（候选补丁与构建产物不会进入真实工作区），但**不是主机级沙箱**：校验命令以 Bridge 所在的系统用户权限运行，仍受该用户的主机访问权限边界约束。因此只应为可信工作区配置你完全信任的命令。
+
 ## 安全边界
 
 - 工作区默认只读；受控写入按来源就绪：manual 工作区设置 `allow_write: true`，managed 工作区经 `authorize_workspace_write` 的精确 `AUTHORIZE` 授权。
 - 提案会展示完整 diff 和 base HEAD。只有精确 `APPLY` 才会继续；应用前 Bridge 会重新检查 Git 顶层、HEAD、干净的 tracked 工作树与 index，以及补丁有效性。生成/refine 无需写授权，写权限只在 APPLY 时需要。
 - 可接受的补丁可以修改已有、已跟踪的普通文本文件，或新增尚不存在、mode 为 100644 的普通文本文件（unborn 仓库仅支持新增）。
 - Bridge 拒绝 delete、rename、copy、binary、mode change、executable、symlink、submodule、危险路径等不支持的补丁，也拒绝目标已存在的新增。
-- Bridge 不会自动测试、stage、commit、push 或创建 Release。
+- `apply_controlled_patch` 不会自动运行校验或测试，也不会 stage、commit、push 或创建 Release。
+- 受控补丁校验是可选、按需的：`validate_controlled_patch` 只在显式调用时运行；普通 `run_task`、提案生成/refine/submit 与 APPLY 路径不增加校验工作，也没有后台校验 worker 或队列。每个已登记工作区最多一个固定校验 profile，由 Bridge 本地 `<config>.validation-profiles.json` sidecar 持久化（0600），配置要求精确 `CONFIGURE`；命令是非空 argv 数组，不经过 shell，校验调用不能携带命令或超时。
+- 校验在临时 detached worktree 中复用既有 preflight 并按序运行 profile 步骤（默认每步 600 秒、总预算 1200 秒），结果只有 `PASS`/`FAIL`/`INCOMPLETE`（unborn 提案返回 `INCOMPLETE` 且 `reason: "unsupported_unborn_base"`）。临时 worktree 隔离保护已登记工作区的整洁，但**不是主机级沙箱**：校验命令以 Bridge 所在的系统用户权限运行，只应配置你完全信任的命令；校验不会授权 APPLY，也不改变提案/任务状态。
 - Codex 后端是 `codex app-server --stdio`，不经过 shell，approval 为 `never`，网络禁用；DSH 通过官方 headless 接口运行，Bridge 对每个 DSH 进程强制 `DSH_PERMISSION_MODE=read-only`，只透传显式 allowlist（含 `DEEPSEEK_API_KEY`、`DSH_TOOLS_MODE`），不透传 proxy 变量。普通/监督任务和提案生成均保持只读，只有经审阅后精确确认 `APPLY` 的应用步骤会写文件。
-- 任务监督状态（task/thread/evidence/review）仅存在于当前进程；受控补丁提案/应用历史与 managed 工作区目录跨重启保留（两个本地状态文件，0600 权限）。每次执行器运行有 15 分钟 hard deadline；active Codex turn 连续 2 分钟没有匹配的 protocol activity 会以 `EXECUTOR_STALLED` 失败，短 Codex RPC 另有 30 秒 bound。正在运行的任务可通过 `control_task(action: "interrupt")` 显式中断；interactive task 的真实 interrupt 若产生部分输出，会以 `partial_output` 返回，普通失败不重新暴露 stderr 或失败 stdout。
+- 任务监督状态（task/thread/evidence/review）仅存在于当前进程；受控补丁提案/应用历史、managed 工作区目录与 validation profile 跨重启保留（三个本地状态文件，0600 权限）。每次执行器运行有 15 分钟 hard deadline；active Codex turn 连续 2 分钟没有匹配的 protocol activity 会以 `EXECUTOR_STALLED` 失败，短 Codex RPC 另有 30 秒 bound。正在运行的任务可通过 `control_task(action: "interrupt")` 显式中断；interactive task 的真实 interrupt 若产生部分输出，会以 `partial_output` 返回，普通失败不重新暴露 stderr 或失败 stdout。
 - 工作区登记两种方式：`workspaces.json` 手动登记（权威），或 `project_root` 批准根目录内的精确 `BIND`/`CREATE` 受管登记；调用时都必须提供已登记的 `workspace_id`。
 - Codex 证据若被既有 bound 截断/淘汰，会带显式 marker（`[truncated]`、changes 省略计数、evidence-drop）——它们表示诊断信息不完整，不是完整 transcript。
 - 只读执行不是 OS 级文件读取隔离；同一系统用户的进程仍可读取操作系统允许的其他文件。
@@ -229,7 +263,7 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到十个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **看不到十二个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node`、`codex` 或 `dsh`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这些可执行文件的路径。
 - **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
 - **受控写入被拒绝：** 检查受控写权限（manual `allow_write` 或 managed `AUTHORIZE`）、Git 顶层与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
