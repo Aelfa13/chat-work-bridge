@@ -11,7 +11,8 @@ import {
   type ControlledPatchValidationProposal
 } from "../../../src/tasks/controlled-patch-service.js";
 import {
-  ControlledPatchValidationService
+  ControlledPatchValidationService,
+  type CleanupDeadlineTimer
 } from "../../../src/tasks/controlled-patch-validation-service.js";
 import { RegisteredWorkspaceTaskService } from "../../../src/tasks/registered-workspace-task-service.js";
 import type {
@@ -111,7 +112,9 @@ class FakeValidationProcessRunner {
   readonly overrides = new Map<string, ValidationProcessOutcome>();
   readonly prefixOverrides: Array<{
     readonly prefix: string;
-    readonly outcome: ValidationProcessOutcome;
+    readonly outcome:
+      | ValidationProcessOutcome
+      | Promise<ValidationProcessOutcome>;
   }> = [];
 
   constructor(
@@ -135,6 +138,43 @@ class FakeValidationProcessRunner {
       return this.fallback.run(request);
     }
     return DEFAULT_OUTCOME;
+  }
+}
+
+class ManualCleanupDeadlineTimer implements CleanupDeadlineTimer {
+  setCount = 0;
+  private nextId = 1;
+  private scheduled:
+    | {
+        readonly handle: NodeJS.Timeout;
+        readonly callback: () => void;
+        readonly delayMs: number;
+      }
+    | undefined;
+
+  get pendingCount(): number {
+    return this.scheduled === undefined ? 0 : 1;
+  }
+
+  set(callback: () => void, delayMs: number): NodeJS.Timeout {
+    this.setCount++;
+    const handle = this.nextId++ as unknown as NodeJS.Timeout;
+    this.scheduled = { handle, callback, delayMs };
+    return handle;
+  }
+
+  clear(handle: NodeJS.Timeout): void {
+    if (this.scheduled?.handle === handle) {
+      this.scheduled = undefined;
+    }
+  }
+
+  fire(): number {
+    assert.notEqual(this.scheduled, undefined);
+    const scheduled = this.scheduled!;
+    this.scheduled = undefined;
+    scheduled.callback();
+    return scheduled.delayMs;
   }
 }
 
@@ -166,6 +206,8 @@ function makeHarness(options: {
   preflightError?: unknown;
   runnerOverrides?: ReadonlyMap<string, ValidationProcessOutcome>;
   nowMs?: () => number;
+  removeParent?: (temporaryParent: string) => Promise<void>;
+  cleanupDeadlineTimer?: CleanupDeadlineTimer;
 }): ValidationHarness {
   const patches = new FakeControlledPatchService(options.proposal);
   if (options.preflightError !== undefined) {
@@ -186,7 +228,9 @@ function makeHarness(options: {
     store as unknown as ValidationProfileStore,
     runner as unknown as ValidationProcessRunner,
     options.nowMs,
-    tempParent
+    tempParent,
+    options.removeParent,
+    options.cleanupDeadlineTimer
   );
   return { service, patches, store, runner, tempParent };
 }
@@ -668,6 +712,61 @@ test("validate is INCOMPLETE with failed cleanup when cleanup fails after a step
   assert.ok(started.includes("npm ci --ignore-scripts"));
   assert.ok(started.includes("npm test"));
   assert.ok(!started.includes("npm run lint"));
+});
+
+test("validate gives the whole cleanup sequence one deadline when parent removal hangs", async () => {
+  const cleanupDeadlineTimer = new ManualCleanupDeadlineTimer();
+  let removeParentStarted = false;
+  const harness = makeHarness({
+    proposal: COMMIT_PROPOSAL,
+    profile: {
+      ...PROFILE,
+      preparation: [],
+      validation: []
+    },
+    removeParent: () => {
+      removeParentStarted = true;
+      return new Promise<void>(() => {});
+    },
+    cleanupDeadlineTimer
+  });
+  let finishWorktreeRemoval:
+    | ((outcome: ValidationProcessOutcome) => void)
+    | undefined;
+  const worktreeRemoval = new Promise<ValidationProcessOutcome>((resolve) => {
+    finishWorktreeRemoval = resolve;
+  });
+  harness.runner.prefixOverrides.push({
+    prefix: "git -C /workspaces/workspace-a worktree remove --force",
+    outcome: worktreeRemoval
+  });
+
+  const validation = harness.service.validate("task-1");
+  const cleanupStarted = () => harness.runner.invocations.some(({ argv }) =>
+    argv.slice(0, 6).join(" ") ===
+      "git -C /workspaces/workspace-a worktree remove --force"
+  );
+  for (let turn = 0; turn < 20 && !cleanupStarted(); turn++) {
+    await Promise.resolve();
+  }
+
+  assert.equal(cleanupStarted(), true);
+  assert.equal(cleanupDeadlineTimer.pendingCount, 1);
+  assert.notEqual(finishWorktreeRemoval, undefined);
+  finishWorktreeRemoval!(DEFAULT_OUTCOME);
+
+  for (let turn = 0; turn < 20 && !removeParentStarted; turn++) {
+    await Promise.resolve();
+  }
+
+  assert.equal(removeParentStarted, true);
+  assert.equal(cleanupDeadlineTimer.setCount, 1);
+  assert.equal(cleanupDeadlineTimer.fire(), 5_000);
+
+  const report = await validation;
+  assert.equal(report.status, "INCOMPLETE");
+  assert.equal(report.cleanup, "failed");
+  assert.equal(report.reason, "cleanup_failed");
 });
 
 test("validate is PASS when preparation, validation, and cleanup all succeed", async () => {

@@ -254,7 +254,7 @@ test("drops an incomplete trailing UTF-8 sequence without expanding the byte-bou
   assert.equal(outcome.outputTail.endsWith("\ufffd"), false);
 });
 
-test("kills the child and returns timeout when the deadline fires", async () => {
+test("does not return timeout until the killed child closes", async () => {
   const child = fakeChild();
   const timers = new ManualTimer();
   timers.currentMs = 100;
@@ -264,16 +264,24 @@ test("kills the child and returns timeout when the deadline fires", async () => 
     ...request(["validator"]),
     timeoutMs: 200
   });
+  let settled = false;
+  void result.then(() => {
+    settled = true;
+  });
   child.writeStdout("before timeout");
   timers.currentMs = 350;
 
   assert.equal(timers.fireNext(), 200);
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(child.killSignals.length, 1);
+
+  child.close(null, "SIGTERM");
   assert.deepEqual(await result, {
     kind: "timeout",
     durationMs: 250,
     outputTail: "before timeout"
   });
-  assert.equal(child.killSignals.length, 1);
 });
 
 test("returns timeout when kill synchronously closes the child", async () => {
@@ -308,7 +316,7 @@ test("returns timeout when kill synchronously closes the child", async () => {
   assert.equal(timers.clearCount, 1);
 });
 
-test("returns timeout without throwing when kill throws", async () => {
+test("does not return timeout until the child closes when kill throws", async () => {
   const child = fakeChild();
   const timers = new ManualTimer();
   timers.currentMs = 10;
@@ -325,16 +333,24 @@ test("returns timeout without throwing when kill throws", async () => {
     ...request(["validator"]),
     timeoutMs: 50
   });
+  let settled = false;
+  void result.then(() => {
+    settled = true;
+  });
   child.writeStderr("before failed kill");
   timers.currentMs = 60;
 
   assert.doesNotThrow(() => timers.fireNext());
+  await Promise.resolve();
+  assert.equal(settled, false);
+  assert.equal(child.killSignals.length, 1);
+
+  child.close(null, "SIGTERM");
   assert.deepEqual(await result, {
     kind: "timeout",
     durationMs: 50,
     outputTail: "before failed kill"
   });
-  assert.equal(child.killSignals.length, 1);
 });
 
 test("returns spawn_error when the child errors before close", async () => {

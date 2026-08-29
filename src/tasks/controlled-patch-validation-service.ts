@@ -39,12 +39,26 @@ export interface ControlledPatchValidationReport {
   readonly reason?: string;
 }
 
+export interface CleanupDeadlineTimer {
+  set(callback: () => void, delayMs: number): NodeJS.Timeout;
+  clear(handle: NodeJS.Timeout): void;
+}
+
 const DEFAULT_STEP_TIMEOUT_SECONDS = 600;
 const DEFAULT_TOTAL_TIMEOUT_SECONDS = 1_200;
 const CLEANUP_TIMEOUT_MS = 5_000;
 
+const systemCleanupDeadlineTimer: CleanupDeadlineTimer = {
+  set: (callback, delayMs) => setTimeout(callback, delayMs),
+  clear: (handle) => clearTimeout(handle)
+};
+
 async function createTempParent(): Promise<string> {
   return mkdtemp(join(tmpdir(), "engineering-bridge-validation-"));
+}
+
+function removeTempParent(temporaryParent: string): Promise<void> {
+  return rm(temporaryParent, { recursive: true, force: true });
 }
 
 function succeeded(outcome: ValidationProcessOutcome): boolean {
@@ -80,7 +94,11 @@ export class ControlledPatchValidationService {
     private readonly profiles: ValidationProfileStore,
     private readonly runner: ValidationProcessRunner,
     private readonly nowMs: () => number = () => Date.now(),
-    private readonly makeTempParent: () => Promise<string> = createTempParent
+    private readonly makeTempParent: () => Promise<string> = createTempParent,
+    private readonly removeParent: (temporaryParent: string) => Promise<void> =
+      removeTempParent,
+    private readonly cleanupDeadlineTimer: CleanupDeadlineTimer =
+      systemCleanupDeadlineTimer
   ) {}
 
   configure(
@@ -305,7 +323,7 @@ export class ControlledPatchValidationService {
     }
 
     try {
-      await rm(temporaryParent, { recursive: true, force: true });
+      await this.removeParent(temporaryParent);
     } catch {
       failed = true;
     }
