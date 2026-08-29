@@ -302,33 +302,51 @@ export class ControlledPatchValidationService {
     worktreeRoot: string,
     temporaryParent: string
   ): Promise<"success" | "failed"> {
-    let failed = false;
-    try {
-      const outcome = await this.runner.run({
-        argv: [
-          "git",
-          "-C",
-          workspaceRoot,
-          "worktree",
-          "remove",
-          "--force",
-          worktreeRoot
-        ],
-        cwd: workspaceRoot,
-        timeoutMs: CLEANUP_TIMEOUT_MS
-      });
-      failed = !succeeded(outcome);
-    } catch {
-      failed = true;
+    let deadlineHandle: NodeJS.Timeout | undefined;
+    const deadline = new Promise<"failed">((resolve) => {
+      deadlineHandle = this.cleanupDeadlineTimer.set(() => {
+        deadlineHandle = undefined;
+        resolve("failed");
+      }, CLEANUP_TIMEOUT_MS);
+    });
+
+    const cleanupSequence = (async (): Promise<"success" | "failed"> => {
+      let failed = false;
+      try {
+        const outcome = await this.runner.run({
+          argv: [
+            "git",
+            "-C",
+            workspaceRoot,
+            "worktree",
+            "remove",
+            "--force",
+            worktreeRoot
+          ],
+          cwd: workspaceRoot,
+          timeoutMs: CLEANUP_TIMEOUT_MS
+        });
+        failed = !succeeded(outcome);
+      } catch {
+        failed = true;
+      }
+
+      try {
+        await this.removeParent(temporaryParent);
+      } catch {
+        failed = true;
+      }
+
+      return failed ? "failed" : "success";
+    })();
+
+    const result = await Promise.race([cleanupSequence, deadline]);
+    if (deadlineHandle !== undefined) {
+      this.cleanupDeadlineTimer.clear(deadlineHandle);
+      deadlineHandle = undefined;
     }
 
-    try {
-      await this.removeParent(temporaryParent);
-    } catch {
-      failed = true;
-    }
-
-    return failed ? "failed" : "success";
+    return result;
   }
 
   private report(

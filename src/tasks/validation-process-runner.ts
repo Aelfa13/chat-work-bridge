@@ -98,7 +98,7 @@ function decodeTail(tail: Buffer): string {
 
 type Completion =
   | { readonly kind: "exit"; readonly exitCode: number }
-  | { readonly kind: "timeout" | "spawn_error" | "signal" };
+  | { readonly kind: "timeout" | "spawn_error" | "signal" | "termination_error" };
 
 export class ValidationProcessRunner {
   constructor(
@@ -112,7 +112,9 @@ export class ValidationProcessRunner {
     return new Promise((resolve) => {
       let completed = false;
       let outputTail = Buffer.alloc(0);
+      let timedOut = false;
       let timeoutHandle: NodeJS.Timeout | undefined;
+      let dispositionGraceHandle: NodeJS.Timeout | undefined;
 
       const complete = (completion: Completion): void => {
         if (completed) {
@@ -122,6 +124,12 @@ export class ValidationProcessRunner {
 
         if (timeoutHandle !== undefined) {
           this.timer.clear(timeoutHandle);
+          timeoutHandle = undefined;
+        }
+
+        if (dispositionGraceHandle !== undefined) {
+          this.timer.clear(dispositionGraceHandle);
+          dispositionGraceHandle = undefined;
         }
 
         const durationMs = this.timer.now() - startedAt;
@@ -166,8 +174,15 @@ export class ValidationProcessRunner {
 
       child.stdout.on("data", capture);
       child.stderr.on("data", capture);
-      child.on("error", () => complete({ kind: "spawn_error" }));
+      child.on("error", () =>
+        complete({ kind: timedOut ? "timeout" : "spawn_error" })
+      );
       child.on("close", (exitCode) => {
+        if (timedOut) {
+          complete({ kind: "timeout" });
+          return;
+        }
+
         complete(
           typeof exitCode === "number"
             ? { kind: "exit", exitCode }
@@ -176,11 +191,17 @@ export class ValidationProcessRunner {
       });
 
       timeoutHandle = this.timer.set(() => {
-        complete({ kind: "timeout" });
+        timeoutHandle = undefined;
+        timedOut = true;
+        dispositionGraceHandle = this.timer.set(() => {
+          dispositionGraceHandle = undefined;
+          complete({ kind: "termination_error" });
+        }, 1_000);
+
         try {
           child.kill();
         } catch {
-          // Timeout classification is already final; killing is best-effort.
+          // The disposition grace bounds termination even when kill throws.
         }
       }, request.timeoutMs);
 
