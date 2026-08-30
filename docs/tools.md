@@ -1,6 +1,6 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.3.0). The local STDIO MCP server exposes ten tools.
+This is the tool surface of Engineering Bridge V1 (1.4.0). The local STDIO MCP server exposes thirteen tools.
 
 ## `run_task`
 
@@ -74,4 +74,22 @@ Registers a caller-provided complete unified Git diff as a retained, already-com
 
 Inputs: `patch_task_id`, `confirmation`.
 
-The single controlled-write checkpoint. Confirmation must equal `APPLY` exactly, the proposal must be known, completed, and not already applied, and the workspace must hold controlled-write permission (managed `AUTHORIZE` or a manual `allow_write: true` entry). The tool rechecks the canonical Git root, clean tracked state and index, and exact base HEAD (including unborn-base validation) before validating and applying the patch once. It can modify existing tracked regular text files or add an absent ordinary text file from an exact 100644 text diff. A new target must be absent from base HEAD, the current index, and the worktree. It never tests, stages, commits, or pushes.
+The controlled file-application checkpoint. Confirmation must equal `APPLY` exactly, the proposal must be known, completed, and not already applied, and the workspace must hold controlled-write permission (managed `AUTHORIZE` or a manual `allow_write: true` entry). The tool rechecks the canonical Git root, clean tracked state and index, and exact base HEAD (including unborn-base validation) before validating and applying the patch once. It can modify existing tracked regular text files or add an absent ordinary text file from an exact 100644 text diff. A new target must be absent from base HEAD, the current index, and the worktree. It never tests, stages, commits, or pushes.
+
+## `commit_controlled_patch`
+
+Inputs: `patch_task_id`, `message`, `confirmation` (must equal `COMMIT` exactly).
+
+Creates one Git commit containing only an already-`APPLY`ed controlled patch. The patch task must identify a retained controlled proposal that has already been applied; `message` must be non-empty and the confirmation is exact and case-sensitive. The commit step is separate from `APPLY`, does not imply any later gate, and never pushes.
+
+## `configure_validation_profile`
+
+Inputs: `workspace_id`, `profile`, `confirmation` (must equal `CONFIGURE` exactly).
+
+Replaces the fixed validation profile for one registered workspace. A profile contains ordered `preparation` and `validation` steps; each step is a non-empty argv array and optional timeout, never a shell string. The profile is persisted in the local `<config>.validation-profiles.json` sidecar. Configuration does not validate a proposal and does not authorize `APPLY` or `COMMIT`.
+
+## `validate_controlled_patch`
+
+Input: `patch_task_id`.
+
+Runs the retained proposal against the workspace validation profile in a temporary detached worktree after the normal controlled-patch preflight. Results are `PASS`, `FAIL`, or `INCOMPLETE`. Validation is optional and on-demand: it neither changes proposal state nor grants write permission, and the detached worktree protects the registered workspace from candidate build artifacts but is not a host-level sandbox. Unborn-base proposals return `INCOMPLETE` with `reason: "unsupported_unborn_base"`.

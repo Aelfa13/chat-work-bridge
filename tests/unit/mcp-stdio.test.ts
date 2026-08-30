@@ -44,6 +44,7 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       "apply_controlled_patch",
       "authorize_workspace_write",
       "bind_project",
+      "commit_controlled_patch",
       "configure_validation_profile",
       "control_task",
       "create_project",
@@ -56,7 +57,8 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
     ]);
 
     const schemas = new Map(listed.tools.map((tool) => [tool.name, tool.inputSchema as {
-      properties?: Record<string, { type?: string; minLength?: number }>;
+      properties?: Record<string, { type?: string; minLength?: number; const?: unknown }>;
+      required?: string[];
     }]));
     for (const name of ["run_task", "generate_controlled_patch", "refine_controlled_patch"]) {
       const properties = schemas.get(name)?.properties;
@@ -64,6 +66,13 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       assert.equal(properties?.model?.minLength, 1);
       assert.equal(properties?.reasoning_effort?.type, "string");
       assert.equal(properties?.reasoning_effort?.minLength, 1);
+    }
+
+    // COMMIT requires every field and the exact literal confirmation.
+    const commitSchema = schemas.get("commit_controlled_patch");
+    assert.equal(commitSchema?.properties?.confirmation?.const, "COMMIT");
+    for (const field of ["patch_task_id", "message", "confirmation"]) {
+      assert.equal(commitSchema?.required?.includes(field), true);
     }
 
     for (const [name, argumentsValue] of [
@@ -688,6 +697,17 @@ index 90be1f3..3b18e51 100644
       }
     });
 
+    // A submitted-but-not-applied proposal refuses exact COMMIT before APPLY.
+    const earlyCommit = await call("commit_controlled_patch", {
+      patch_task_id: taskId,
+      message: "feat: commit submitted patch",
+      confirmation: "COMMIT"
+    });
+    assert.equal(earlyCommit.isError, true);
+    assert.deepEqual(earlyCommit.body, {
+      raw: "The requested state transition is not allowed."
+    });
+
     // The submitted proposal is applied through the existing APPLY tool.
     const applied = await call("apply_controlled_patch", {
       patch_task_id: taskId,
@@ -696,6 +716,50 @@ index 90be1f3..3b18e51 100644
     assert.equal(applied.isError, false);
     assert.deepEqual(applied.body, { patch_task_id: taskId, applied: true, changed_paths: ["note.txt"] });
     assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+
+    // Lowercase confirmation is rejected by the MCP input schema before any
+    // business logic: the SDK validation prefix appears, no commit payload is
+    // produced, and HEAD plus the applied tracked dirt stay untouched.
+    const lowercased = await call("commit_controlled_patch", {
+      patch_task_id: taskId,
+      message: "feat: commit submitted patch",
+      confirmation: "commit"
+    });
+    assert.equal(lowercased.isError, true);
+    assert.equal(typeof lowercased.body.raw, "string");
+    assert.match(
+      String(lowercased.body.raw),
+      /Input validation error: Invalid arguments for tool commit_controlled_patch:/u
+    );
+    assert.equal(JSON.stringify(lowercased.body).includes("committed"), false);
+    assert.equal(
+      execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      head
+    );
+    assert.equal(
+      execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }),
+      " M note.txt\n"
+    );
+
+    // Exact COMMIT creates one commit containing only the already-APPLYed proposal.
+    const committed = await call("commit_controlled_patch", {
+      patch_task_id: taskId,
+      message: "feat: commit submitted patch",
+      confirmation: "COMMIT"
+    });
+    assert.equal(committed.isError, false);
+    assert.equal(committed.body.patch_task_id, taskId);
+    assert.equal(committed.body.committed, true);
+    assert.match(String(committed.body.commit_sha), /^[0-9a-f]{40,64}$/u);
+    assert.equal(
+      execFileSync("git", ["log", "-1", "--format=%s"], { cwd: root, encoding: "utf8" }).trim(),
+      "feat: commit submitted patch"
+    );
+    assert.equal(
+      execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim(),
+      committed.body.commit_sha
+    );
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" }), "");
   } finally {
     await client.close();
   }

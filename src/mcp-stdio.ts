@@ -333,6 +333,21 @@ async function main(): Promise<void> {
     await controlledPatches.apply({ patch_task_id, confirmation })
   ));
 
+  server.registerTool("commit_controlled_patch", {
+    description: "Create one Git commit containing only an already-APPLYed controlled patch after exact COMMIT confirmation. Never pushes.",
+    inputSchema: {
+      patch_task_id: z.string().min(1),
+      message: z.string().min(1),
+      confirmation: z.literal("COMMIT")
+    }
+  }, async ({ patch_task_id, message, confirmation }) => jsonContent(
+    await controlledPatches.commit({
+      patch_task_id,
+      message,
+      confirmation
+    })
+  ));
+
   server.registerTool("configure_validation_profile", {
     description: "Configure the fixed validation profile for a registered workspace after exact CONFIGURE confirmation.",
     inputSchema: z.object({

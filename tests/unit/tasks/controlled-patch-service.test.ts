@@ -122,6 +122,32 @@ index 0000000..3e75765
 +added
 `;
 
+async function appliedFixture(
+  root: string,
+  patch: string = validPatch,
+  startProcess?: GitStarter
+): Promise<{
+  controlled: ControlledPatchService;
+  tasks: RegisteredWorkspaceTaskService;
+  taskId: string;
+}> {
+  const current = fixture(
+    root,
+    async () => ({ kind: "completed", output: patch }),
+    startProcess
+  );
+  const generated = await current.controlled.generate({
+    workspace_id: "workspace",
+    change_request: "apply then commit"
+  });
+  await terminal(current.tasks, generated.taskId);
+  await current.controlled.apply({
+    patch_task_id: generated.taskId,
+    confirmation: "APPLY"
+  });
+  return { ...current, taskId: generated.taskId };
+}
+
 const markdownFencePatch = [
   "diff --git a/README.md b/README.md",
   "--- a/README.md",
@@ -568,6 +594,399 @@ test("stores and applies a controlled patch normalized to one trailing LF", asyn
   });
   await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("COMMIT requires exact confirmation and an applied proposal", async () => {
+  const root = repository();
+  try {
+    const current = fixture(root, async () => ({ kind: "completed", output: validPatch }));
+    const generated = await current.controlled.generate({
+      workspace_id: "workspace",
+      change_request: "change note"
+    });
+    await terminal(current.tasks, generated.taskId);
+
+    await expectCode(
+      () => current.controlled.commit({
+        patch_task_id: generated.taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "INVALID_STATE_TRANSITION"
+    );
+
+    await current.controlled.apply({
+      patch_task_id: generated.taskId,
+      confirmation: "APPLY"
+    });
+
+    await expectCode(
+      () => current.controlled.commit({
+        patch_task_id: generated.taskId,
+        message: "feat: commit patch",
+        confirmation: "commit"
+      }),
+      "INVALID_STATE_TRANSITION"
+    );
+
+    await expectCode(
+      () => current.controlled.commit({
+        patch_task_id: "00000000-0000-0000-0000-000000000000",
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "INVALID_STATE_TRANSITION"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT trims one-line messages and rejects empty multiline and overlong messages", async () => {
+  for (const message of ["", "   ", "line one\nline two", "x".repeat(201)]) {
+    const root = repository();
+    try {
+      const { controlled, taskId } = await appliedFixture(root);
+      await expectCode(
+        () => controlled.commit({
+          patch_task_id: taskId,
+          message,
+          confirmation: "COMMIT"
+        }),
+        "WORKSPACE_PRECONDITION_FAILED"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("COMMIT rejects a changed base HEAD", async () => {
+  const root = repository();
+  try {
+    const { controlled, taskId } = await appliedFixture(root);
+    writeFileSync(join(root, "other.txt"), "other\n");
+    git(root, "add", "other.txt");
+    git(root, "commit", "-qm", "advance head");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT rejects a nonempty index before staging", async () => {
+  const root = repository();
+  try {
+    const { controlled, taskId } = await appliedFixture(root);
+    writeFileSync(join(root, "other.txt"), "other\n");
+    git(root, "add", "other.txt");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only").trim(), "other.txt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT rejects unrelated tracked or untracked dirt", async () => {
+  for (const kind of ["tracked", "untracked"] as const) {
+    const root = repository();
+    try {
+      if (kind === "tracked") {
+        writeFileSync(join(root, "other.txt"), "base\n");
+        git(root, "add", "other.txt");
+        git(root, "commit", "-qm", "add other");
+      }
+      const { controlled, taskId } = await appliedFixture(root);
+      writeFileSync(join(root, "other.txt"), "dirty\n");
+
+      await expectCode(
+        () => controlled.commit({
+          patch_task_id: taskId,
+          message: "feat: commit patch",
+          confirmation: "COMMIT"
+        }),
+        "WORKSPACE_PRECONDITION_FAILED"
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("COMMIT rechecks write authorization after APPLY", async () => {
+  const root = repository();
+  const stateFilePath = retainedStateFile();
+  try {
+    const current = fixture(
+      root,
+      async () => ({ kind: "completed", output: validPatch }),
+      undefined,
+      stateFilePath
+    );
+    const generated = await current.controlled.generate({
+      workspace_id: "workspace",
+      change_request: "change note"
+    });
+    await terminal(current.tasks, generated.taskId);
+    await current.controlled.apply({
+      patch_task_id: generated.taskId,
+      confirmation: "APPLY"
+    });
+
+    const readOnlyRegistry = new RegisteredWorkspaceRegistry([]);
+    readOnlyRegistry.registerManaged("workspace", root);
+    const readOnlyTasks = new RegisteredWorkspaceTaskService(
+      readOnlyRegistry,
+      () => ({
+        execute: async () => ({ kind: "completed", output: validPatch })
+      })
+    );
+    const reloaded = new ControlledPatchService(
+      readOnlyRegistry,
+      readOnlyTasks,
+      undefined,
+      stateFilePath
+    );
+    await reloaded.load();
+
+    await expectCode(
+      () => reloaded.commit({
+        patch_task_id: generated.taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(stateFilePath, { force: true });
+  }
+});
+
+test("COMMIT rejects an applied path whose retained patch content no longer matches", async () => {
+  const root = repository();
+  try {
+    const { controlled, taskId } = await appliedFixture(root);
+    writeFileSync(join(root, "note.txt"), "tampered\n");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "tampered\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT creates one commit from exactly the applied proposal paths", async () => {
+  const root = repository();
+  const gitCalls: Array<{ executable: string; args: readonly string[]; shell: unknown }> = [];
+  const starter: GitStarter = (executable, args, options) => {
+    gitCalls.push({ executable, args, shell: options.shell });
+    return spawn(executable, args, options);
+  };
+
+  try {
+    const { controlled, taskId } = await appliedFixture(root, validPatch, starter);
+    const beforeHead = git(root, "rev-parse", "HEAD").trim();
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "  feat: commit applied patch  ",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.patch_task_id, taskId);
+    assert.equal(result.committed, true);
+    assert.match(result.commit_sha, /^[0-9a-f]{40,64}$/u);
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), result.commit_sha);
+    assert.equal(git(root, "rev-parse", "HEAD^").trim(), beforeHead);
+    assert.equal(
+      git(root, "log", "-1", "--format=%s").trim(),
+      "feat: commit applied patch"
+    );
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "note.txt"
+    );
+    assert.equal(git(root, "status", "--porcelain"), "");
+
+    const commitCalls = gitCalls.filter(({ args }) => args.includes("commit"));
+    assert.deepEqual(commitCalls, [{
+      executable: "git",
+      args: [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "--no-verify",
+        "-m",
+        "feat: commit applied patch"
+      ],
+      shell: false
+    }]);
+    assert.equal(gitCalls.some(({ args }) => args.includes("push")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT fails closed on missing Git identity without editing config", async () => {
+  const root = repository();
+  const starter: GitStarter = (executable, args, options) => {
+    if (args[0] === "var" && args[1] === "GIT_AUTHOR_IDENT") {
+      return spawn(process.execPath, ["-e", "process.exit(1)"], options);
+    }
+    return spawn(executable, args, options);
+  };
+
+  try {
+    const { controlled, taskId } = await appliedFixture(root, validPatch, starter);
+    const beforeConfig = git(root, "config", "--local", "--list");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(git(root, "config", "--local", "--list"), beforeConfig);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT failure unstages only Bridge paths and preserves modified worktree content", async () => {
+  const root = repository();
+  const starter: GitStarter = (executable, args, options) => {
+    if (args.includes("commit")) {
+      return spawn(process.execPath, ["-e", "process.exit(1)"], options);
+    }
+    return spawn(executable, args, options);
+  };
+
+  try {
+    const { controlled, taskId } = await appliedFixture(root, validPatch, starter);
+    const beforeHead = git(root, "rev-parse", "HEAD").trim();
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+    assert.equal(git(root, "status", "--porcelain"), " M note.txt\n");
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), beforeHead);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT failure leaves an added proposal file present and untracked after cleanup", async () => {
+  const root = repository();
+  const starter: GitStarter = (executable, args, options) => {
+    if (args.includes("commit")) {
+      return spawn(process.execPath, ["-e", "process.exit(1)"], options);
+    }
+    return spawn(executable, args, options);
+  };
+
+  try {
+    const { controlled, taskId } = await appliedFixture(root, additionPatch, starter);
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit added file",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.match(git(root, "status", "--porcelain"), /^\?\? added\.txt\n?$/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT recovers success when the subprocess reports failure after HEAD advances exactly once", async () => {
+  const root = repository();
+  const gitCalls: Array<readonly string[]> = [];
+  const starter: GitStarter = (executable, args, options) => {
+    gitCalls.push(args);
+    if (args.includes("commit")) {
+      return spawn(process.execPath, [
+        "-e",
+        "const cp=require('node:child_process');const [git,argsJson]=process.argv.slice(1);const r=cp.spawnSync(git,JSON.parse(argsJson),{cwd:process.cwd(),stdio:'inherit',shell:false});process.exit(r.status===0?1:(r.status??1));",
+        executable,
+        JSON.stringify(args)
+      ], options);
+    }
+    return spawn(executable, args, options);
+  };
+
+  try {
+    const { controlled, taskId } = await appliedFixture(root, validPatch, starter);
+    const beforeHead = git(root, "rev-parse", "HEAD").trim();
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: reconcile committed result",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), result.commit_sha);
+    assert.equal(git(root, "rev-parse", "HEAD^").trim(), beforeHead);
+    assert.equal(git(root, "status", "--porcelain"), "");
+
+    const commitCallIndex = gitCalls.findIndex((args) => args.includes("commit"));
+    assert.notEqual(commitCallIndex, -1);
+    assert.deepEqual(gitCalls.slice(commitCallIndex + 1), [
+      ["rev-parse", "HEAD"],
+      ["rev-list", "--parents", "-n", "1", "HEAD"],
+      ["diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"],
+      ["log", "-1", "--format=%s"],
+      ["diff", "--cached", "--name-only", "-z"],
+      ["diff", "--name-only", "-z", "--"],
+      ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+      ["rev-parse", "HEAD"]
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("applies a valid patch when Markdown context contains fenced code", async () => {
