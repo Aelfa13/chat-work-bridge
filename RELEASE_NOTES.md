@@ -1,5 +1,20 @@
 # Release notes
 
+## v1.4.0
+
+v1.4.0 closes the supervised controlled-write loop while keeping publication outside Bridge.
+
+### Added
+
+- Add optional controlled-patch validation through `configure_validation_profile` and `validate_controlled_patch`. Validation runs only when explicitly requested, uses a fixed per-workspace profile in a temporary detached worktree, and reports `PASS`, `FAIL`, or `INCOMPLETE`; it does not authorize or imply `APPLY`.
+- Add `commit_controlled_patch` as a separate exact `COMMIT` gate for an already-`APPLY`ed controlled patch. It creates one Git commit containing only that applied patch and never pushes.
+
+### Release boundary
+
+- The local STDIO MCP surface is now 13 tools.
+- `APPLY` remains the explicit filesystem-mutation gate; `COMMIT` is a separate Git-history gate. Neither gate implies push or Release creation.
+- Fresh-chat catalog verification confirmed all 13 tools, and a disposable controlled-COMMIT E2E confirmed that `APPLY` leaves HEAD unchanged and `COMMIT` alone advances HEAD while leaving the worktree clean.
+
 ## v1.3.0
 
 v1.3.0 has been published as a Git tag and GitHub Release. This does not indicate npm publication.

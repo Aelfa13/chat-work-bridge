@@ -147,7 +147,7 @@ npm run build
 
 使用 DSH 时，若 `DEEPSEEK_API_KEY` 已设置在 Bridge 进程运行时的环境变量中（例如 shell 或启动器环境），Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量。不要把它写进这里的 `env` 覆盖或任何配置文件——密钥不应落入配置。
 
-重新连接集成，并确认能看到以下十二个当前 V1 工具：
+重新连接集成，并确认能看到以下十三个当前 V1 工具：
 
 - `run_task`
 - `task_result`
@@ -159,6 +159,7 @@ npm run build
 - `refine_controlled_patch`
 - `submit_controlled_patch`
 - `apply_controlled_patch`
+- `commit_controlled_patch`
 - `configure_validation_profile`
 - `validate_controlled_patch`
 
@@ -191,7 +192,7 @@ git -C /absolute/path/to/my-project status --short
 1. 确认配置根目录就是 Git 顶层，且 tracked 工作树和 index 均干净（已有 HEAD，或支持 unborn 仓库的新增文件提案）。
 2. 调用 `generate_controlled_patch`，传入工作区 ID 和范围明确的要求（可选 `executor: "codex" | "dsh"`，默认 `codex`）；或者用 `submit_controlled_patch` 提交 caller 已提供的完整 unified diff 与精确 current `base_head`。submit 不运行执行器，但会执行相同的只读 preflight。**生成/refine/submit 都是只读提案，可在任意已登记工作区进行，无需写授权**。
 3. 对生成的 patch task ID 使用 `task_result`，直到 `state=completed`；完整 unified diff 会在 `output` 中返回。submitted proposal 注册时已经 completed。如需修正，调用 `refine_controlled_patch` 并传入已完成的 patch task ID 和修正要求（同样可选 `executor: "codex" | "dsh"`，默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。它会保留原提案，基于同一个 `base_head` 返回新的完整提案。运行中的 generated/refined task 可通过 `control_task` interrupt（Codex 还可 steer），但提案任务不会进入 `waiting_for_supervisor_review`，不会产生 `review_output`，也不能通过 `control_task` accept。
-4. 在任务状态之外，按 generate/refine/submit → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。managed 工作区在 APPLY 前如有需要先完成 `AUTHORIZE`。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。
+4. 在任务状态之外，按 generate/refine/submit → 检查全部路径、完整 diff 和返回的 `base_head` → 精确 `APPLY` → `apply_controlled_patch` 的顺序操作。managed 工作区在 APPLY 前如有需要先完成 `AUTHORIZE`。确认正确后，传入该 `patch_task_id` 调用 `apply_controlled_patch`，确认值必须精确等于 `APPLY`。`APPLY` 只修改工作树，不会自动提交。
 5. 检查结果：
 
    ```sh
@@ -200,7 +201,7 @@ git -C /absolute/path/to/my-project status --short
    git -C /absolute/path/to/my-project diff
    ```
 
-6. 运行项目测试，再决定是否 stage、commit、push 和发布。`apply_controlled_patch` 不会自动运行校验或测试；如需先校验提案，可在 APPLY 前调用 `validate_controlled_patch`（见第 7 节）。
+6. 运行项目测试；如需由 Bridge 创建 Git commit，对同一个已 `APPLY` 的 `patch_task_id` 调用 `commit_controlled_patch`，提供非空提交信息并将确认值精确设为 `COMMIT`。它只提交该受控补丁且绝不 push。push 和 Release 创建仍由人单独决定。`apply_controlled_patch` 不会自动运行校验或测试；如需先校验提案，可在 APPLY 前调用 `validate_controlled_patch`（见第 7 节）。
 
 其他位置的 untracked 文件本身不会破坏 tracked state 干净这一要求，但提案中的新增文件目标必须同时不存在于 HEAD、index 和工作树。unborn 仓库（例如 `create_project` 创建的空仓库）支持新增 ordinary 100644 文本文件；Bridge 不会自动 `git add` 或 commit。
 

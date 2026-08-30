@@ -76,8 +76,9 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 | Bind or create and register a workspace inside `project_root` with exact `BIND`/`CREATE` | Not OS-level read isolation | Adapt other CLI agents one at a time |
 | Generate a complete Git patch before any write; controlled writes for managed workspaces after exact `AUTHORIZE` | No HTTP, UI, account system, caller authentication, or remote transport | DSH native headless session resume |
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation; unborn repositories support added 100644 text files | Does not persist task/thread/evidence supervision history; no resource quota | Persistent task/audit history |
+| Commit an already-`APPLY`ed controlled patch only after exact `COMMIT`; Bridge never pushes | Does not automatically publish or create a Release | — |
 | Controlled-patch proposals/applied history and the managed workspace catalog survive restarts | — | Carefully explore multi-agent orchestration |
-| Ten local MCP tools over STDIO | — | — |
+| Thirteen local MCP tools over STDIO | — | — |
 
 ## Quick start
 
@@ -101,7 +102,7 @@ npm install
 npm run build
 ```
 
-The current v1.3.0 release has no one-click installer.
+The current v1.4.0 release has no one-click installer.
 
 ### 3. Register a workspace
 
@@ -188,7 +189,7 @@ Controlled-write permission is set per workspace source: manual workspaces set `
 1. Confirm the configured root is the Git top-level and the tracked worktree and index are clean (with an existing HEAD, or unborn-repository support for added-file proposals).
 2. Call `generate_controlled_patch` with the workspace ID and a narrow request (optionally passing `executor: "codex" | "dsh"`, default `codex`), or use `submit_controlled_patch` with a caller-provided complete unified diff and the exact current `base_head`. Submission runs no executor but performs the same read-only preflight. **Generation/refinement/submission is a read-only proposal and works in any registered workspace without write authorization**.
 3. Poll a generated patch task ID through `task_result` until `state=completed`; the complete unified diff is returned as `output`. A submitted proposal is already completed when registered. If it needs correction, call `refine_controlled_patch` with the completed patch task ID and a refinement request (also optionally passing `executor: "codex" | "dsh"`, default `codex`); the executor is selected per call and `refine_controlled_patch` does not inherit the parent proposal's executor. It retains the source and returns a new complete proposal against the same `base_head`. Running generated/refined tasks can be interrupted through `control_task` (and Codex tasks can be steered), but proposal tasks never enter `waiting_for_supervisor_review`, produce no `review_output`, and must not be accepted through `control_task`.
-4. Outside task state, follow generate/refine/submit → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. For managed workspaces, complete `AUTHORIZE` first if needed. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly.
+4. Outside task state, follow generate/refine/submit → inspect every path, the complete diff, and returned `base_head` → exact `APPLY` → `apply_controlled_patch`. For managed workspaces, complete `AUTHORIZE` first if needed. If acceptable, call `apply_controlled_patch` with that `patch_task_id`; confirmation must equal `APPLY` exactly. `APPLY` changes the worktree but does not create a Git commit.
 5. Inspect the result:
 
    ```sh
@@ -197,7 +198,7 @@ Controlled-write permission is set per workspace source: manual workspaces set `
    git -C /absolute/path/to/my-project diff
    ```
 
-6. Run the project's tests and decide whether to stage, commit, push, and release. Bridge performs none of them.
+6. Run the project's tests. To have Bridge create the Git commit, call `commit_controlled_patch` with the same already-`APPLY`ed `patch_task_id`, a non-empty message, and confirmation exactly equal to `COMMIT`. It commits only that controlled patch and never pushes; push and Release creation remain separate human decisions.
 
 Untracked files elsewhere do not by themselves violate the clean tracked-state requirement, but any proposed new-file target must be absent from HEAD, the index, and the worktree. Unborn repositories (for example, a fresh `create_project` workspace) support proposals that add ordinary 100644 text files; Bridge never runs `git add` or commits automatically.
 
@@ -229,7 +230,7 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 
 ## Troubleshooting
 
-- **The ten tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
+- **The thirteen tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
 - **The client cannot find `node`, `codex`, or `dsh`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing these executables.
 - **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
 - **Controlled write refused:** check the controlled-write permission (manual `allow_write` or managed `AUTHORIZE`), the Git top-level, and a clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
