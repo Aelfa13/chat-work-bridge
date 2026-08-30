@@ -303,6 +303,39 @@ export class ControlledPatchService {
     });
   }
 
+  async commit(request: {
+    patch_task_id: string;
+    message: string;
+    confirmation: string;
+  }): Promise<{
+    patch_task_id: Id;
+    committed: true;
+    commit_sha: string;
+  }> {
+    if (request.confirmation !== "COMMIT") {
+      throw new CoreError("INVALID_STATE_TRANSITION");
+    }
+
+    const taskId = request.patch_task_id as Id;
+    const proposal = this.proposals.get(taskId);
+    const patch = proposal?.output;
+    if (proposal === undefined || proposal.state !== "applied" || patch === undefined) {
+      throw new CoreError("INVALID_STATE_TRANSITION");
+    }
+    const message = normalizeCommitMessage(request.message);
+
+    return this.withApplyLock(proposal.workspaceRoot, async () => {
+      if (proposal.state !== "applied") {
+        throw new CoreError("INVALID_STATE_TRANSITION");
+      }
+      if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot ||
+          proposal.base.kind !== "commit") {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
+      return this.commitAppliedProposal(taskId, proposal, patch, message);
+    });
+  }
+
   private withApplyLock<T>(workspaceRoot: string, action: () => Promise<T>): Promise<T> {
     const previous = this.applyQueues.get(workspaceRoot) ?? Promise.resolve();
     const current = previous.then(action, action);
@@ -311,6 +344,176 @@ export class ControlledPatchService {
     return current.finally(() => {
       if (this.applyQueues.get(workspaceRoot) === settled) this.applyQueues.delete(workspaceRoot);
     });
+  }
+
+  private async commitAppliedProposal(
+    taskId: Id,
+    proposal: Proposal,
+    patch: string,
+    message: string
+  ): Promise<{
+    patch_task_id: Id;
+    committed: true;
+    commit_sha: string;
+  }> {
+    await this.verifyWorkspaceRoot(proposal.workspaceRoot);
+    const base = proposal.base;
+    const currentBase = await this.detectBase(proposal.workspaceRoot);
+    if (base.kind !== "commit" || !sameBase(currentBase, base)) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    const stagedBefore = splitNul(await this.git(proposal.workspaceRoot, [
+      "diff",
+      "--cached",
+      "--name-only",
+      "-z"
+    ]));
+    if (stagedBefore.length !== 0) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    const targets = parsePatch(patch).map(({ path }) => path).sort();
+    const trackedDirty = splitNul(await this.git(proposal.workspaceRoot, [
+      "diff",
+      "--name-only",
+      "-z",
+      "--"
+    ]));
+    const untrackedDirty = splitNul(await this.git(proposal.workspaceRoot, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--"
+    ]));
+    const actualDirty = [...new Set([...trackedDirty, ...untrackedDirty])].sort();
+    if (!sameStrings(actualDirty, targets)) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    if (!(await this.applyCheck(proposal.workspaceRoot, patch, true))) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    await this.git(proposal.workspaceRoot, ["var", "GIT_AUTHOR_IDENT"]);
+    await this.git(proposal.workspaceRoot, ["var", "GIT_COMMITTER_IDENT"]);
+
+    try {
+      await this.git(proposal.workspaceRoot, ["add", "--", ...targets]);
+      const stagedAfter = splitNul(await this.git(proposal.workspaceRoot, [
+        "diff",
+        "--cached",
+        "--name-only",
+        "-z"
+      ])).sort();
+      if (!sameStrings(stagedAfter, targets)) {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
+    } catch (error) {
+      await this.unstageCommittedPathsIfHeadRemainsBase(
+        proposal.workspaceRoot,
+        base.head,
+        targets
+      );
+      throw error;
+    }
+
+    let commitError: unknown;
+    try {
+      await this.git(proposal.workspaceRoot, [
+        "-c",
+        "core.hooksPath=/dev/null",
+        "-c",
+        "commit.gpgSign=false",
+        "commit",
+        "--no-verify",
+        "-m",
+        message
+      ]);
+    } catch (error) {
+      commitError = error;
+    }
+
+    const commitSha = (await this.git(proposal.workspaceRoot, [
+      "rev-parse",
+      "HEAD"
+    ])).trim();
+    if (commitSha === base.head) {
+      await this.unstageCommittedPaths(proposal.workspaceRoot, targets);
+      if (commitError !== undefined) throw commitError;
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    const ancestry = (await this.git(proposal.workspaceRoot, [
+      "rev-list",
+      "--parents",
+      "-n",
+      "1",
+      "HEAD"
+    ])).trim().split(/\s+/u);
+    if (!/^[0-9a-f]{40,64}$/u.test(commitSha) ||
+        ancestry.length !== 2 || ancestry[0] !== commitSha || ancestry[1] !== base.head) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    const committedPaths = splitNul(await this.git(proposal.workspaceRoot, [
+      "diff-tree",
+      "--no-commit-id",
+      "--name-only",
+      "-r",
+      "-z",
+      "HEAD"
+    ])).sort();
+    const committedSubject = (await this.git(proposal.workspaceRoot, [
+      "log",
+      "-1",
+      "--format=%s"
+    ])).trim();
+    if (!sameStrings(committedPaths, targets) || committedSubject !== message) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    const stagedFinal = splitNul(await this.git(proposal.workspaceRoot, [
+      "diff",
+      "--cached",
+      "--name-only",
+      "-z"
+    ]));
+    const trackedFinal = splitNul(await this.git(proposal.workspaceRoot, [
+      "diff",
+      "--name-only",
+      "-z",
+      "--"
+    ]));
+    const untrackedFinal = splitNul(await this.git(proposal.workspaceRoot, [
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
+      "--"
+    ]));
+    const finalHead = (await this.git(proposal.workspaceRoot, ["rev-parse", "HEAD"])).trim();
+    if (stagedFinal.length !== 0 || trackedFinal.length !== 0 ||
+        untrackedFinal.length !== 0 || finalHead !== commitSha) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+
+    return { patch_task_id: taskId, committed: true, commit_sha: commitSha };
+  }
+
+  private async unstageCommittedPathsIfHeadRemainsBase(
+    workspaceRoot: string,
+    baseHead: string,
+    paths: readonly string[]
+  ): Promise<void> {
+    const head = await this.gitResult(workspaceRoot, ["rev-parse", "--verify", "HEAD"]);
+    if (head.code === 0 && head.stdout.trim() === baseHead) {
+      await this.unstageCommittedPaths(workspaceRoot, paths);
+    }
+  }
+
+  private async unstageCommittedPaths(workspaceRoot: string, paths: readonly string[]): Promise<void> {
+    await this.git(workspaceRoot, ["reset", "-q", "HEAD", "--", ...paths]);
   }
 
   private async applyCheck(workspaceRoot: string, patch: string, reverse: boolean): Promise<boolean> {
@@ -457,6 +660,13 @@ export class ControlledPatchService {
   }
 
   private async verifyWorkspace(workspaceRoot: string): Promise<ProposalBase> {
+    await this.verifyWorkspaceRoot(workspaceRoot);
+    const status = await this.git(workspaceRoot, ["status", "--porcelain", "--untracked-files=no"]);
+    if (status.length !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    return this.detectBase(workspaceRoot);
+  }
+
+  private async verifyWorkspaceRoot(workspaceRoot: string): Promise<void> {
     const topLevel = (await this.git(workspaceRoot, ["rev-parse", "--show-toplevel"])).trim();
     let canonicalTopLevel: string;
     let canonicalWorkspaceRoot: string;
@@ -469,9 +679,6 @@ export class ControlledPatchService {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     }
     if (canonicalTopLevel !== canonicalWorkspaceRoot) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    const status = await this.git(workspaceRoot, ["status", "--porcelain", "--untracked-files=no"]);
-    if (status.length !== 0) throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
-    return this.detectBase(workspaceRoot);
   }
 
   // Distinguishes the three possible HEAD states without ever inferring "unborn"
@@ -695,6 +902,28 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 function normalizeTrailingLf(output: string): string {
   return `${output.replace(/\n*$/u, "")}\n`;
+}
+
+function normalizeCommitMessage(value: string): string {
+  const message = value.trim();
+  if (message.length === 0 || message.includes("\n") || message.includes("\r") ||
+      [...message].length > 200) {
+    throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+  }
+  return message;
+}
+
+function splitNul(value: string): string[] {
+  if (value.length === 0) return [];
+  const parts = value.split("\0");
+  if (parts[parts.length - 1] === "") parts.pop();
+  if (parts.some((part) => part.length === 0)) failPatch();
+  return parts;
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length &&
+    left.every((value, index) => value === right[index]);
 }
 
 type PatchTarget = { path: string; kind: "modified" | "added" };
