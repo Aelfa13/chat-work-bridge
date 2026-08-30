@@ -1,0 +1,16 @@
+# Keep ordinary text portable; add exact eol rules for byte-frozen generated files.
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.db binary
+
+# Example: use a precise rule when a generated file has a frozen byte hash.
+# path/to/generated/*.h text eol=lf

@@ -1,0 +1,5 @@
+schema: 1
+rules: []
+# Add only exact, reviewed path entries.
+# Required fields: path, class, reason, owner, reviewed_at.
+# Unknown differences remain blocking.

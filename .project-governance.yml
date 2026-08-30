@@ -1,0 +1,61 @@
+schema: 1
+bootstrapped_at: 2026-08-30
+project:
+  name: "chat-work-bridge"
+  description: "Existing Node.js/TypeScript local MCP STDIO package"
+  profile: "continuous"
+  runtime: "local_mcp_stdio"
+  node: ">=22"
+  build_command: "npm run build"
+  test_command: "npm test"
+  github_ci_release: "present"
+branches:
+  default: "main"
+  development: "dev"
+  production_history: "N/A"
+  feature_pattern: "feature/*"
+  fix_pattern: "fix/*"
+  release_pattern: "release/*"
+  hotfix_pattern: "hotfix/*"
+remote:
+  origin:
+    url: "git@github.com:Aelfa13/chat-work-bridge.git"
+    role: "personal_fork"
+  upstream:
+    url: "git@github.com:wudy29/engineering-bridge.git"
+    role: "source_upstream"
+  proof: "actual_git_transport"
+  write_policy: "MANUAL"
+environments:
+  development:
+    role: "daily source of truth"
+  validation:
+    enabled: true
+    root: "D:/HuaweiMoveData/Users/aelfa/Documents/codex project/chat-work-bridge-validation"
+    role: "development_test_boundary_not_production_copy"
+    data_policy: "separate synthetic_or_sanitized_data"
+    lifecycle: "manual_start_test_stop"
+    default_state: "disabled_inactive"
+  production:
+    enabled: false
+    role: "N/A_no_real_production_runtime"
+  clean_mirror:
+    enabled: false
+    status: "NOT_CONFIGURED"
+boundaries:
+  secrets: "outside_git"
+  runtime_data: "outside_git"
+  build_artifacts: "outside_git_or_explicitly_versioned"
+backup:
+  code: "GitHub remotes present; recovery mirror NOT_CONFIGURED"
+  runtime_data: "N/A_no_real_production_runtime"
+  private_config: "NOT_CONFIGURED_no_secrets_recorded"
+drift:
+  scope: "N/A_until_production_runtime_exists"
+  compare_order:
+    - presence
+    - raw_sha256
+    - text_normalized_sha256
+    - binary_raw_sha256
+  exact_allowlist: "docs/operations/production-drift-allowlist.yml"
+  unknown_blocks: true
