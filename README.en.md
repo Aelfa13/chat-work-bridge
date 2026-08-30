@@ -6,13 +6,13 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · Local · Continuously maintainer-tested on macOS.** The v1.4.0 tag and GitHub Release have been published; this does not indicate npm publication. The v1.2.1 Codex and DSH Windows npm CLI launch path has been verified on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
+[简体中文](README.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · Local · Continuously maintainer-tested on macOS.** The v1.4.0 tag and GitHub Release have been published; this does not indicate npm publication. Windows currently has smoke verification of the Codex and DSH npm CLI launch path on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
 
 ## Before / now
 
 **Before:** you discussed requirements in Chat, manually copied a prompt into Codex, then carried Codex's result back to Chat for the next round—repeating the shuttle each time.
 
-**Now:** Chat hands the task directly to local Codex or DSH (each `run_task` accepts an optional `executor: "codex" | "dsh"`, defaulting to `codex`) and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. The core V1 change over the older one-shot task/result flow is an explicit interactive supervision flow: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`. For controlled changes, you still review the complete diff first and retain the decision to write.
+**Now:** Chat hands the task directly to local Codex or DSH (each `run_task` accepts an optional `executor: "codex" | "dsh"`, defaulting to `codex`) and can keep observing and following that same task. Within the same native Codex context, Chat can continue the work, steer or correct it, interrupt execution, and accept the result after review—without manually moving prompts or results. Compared with the older one-shot task/result flow, the current Bridge model introduces an explicit interactive supervision flow: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`. For controlled changes, you still review the complete diff first and retain the decision to write.
 
 ```mermaid
 flowchart LR
@@ -84,9 +84,9 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 
 ## Capability map
 
-| Available today | Does not do today | Roadmap—not current support |
+| Available today | Current boundaries / not automatic | Roadmap—not current support |
 | --- | --- | --- |
-| Read-only analysis, code location, and review in a pre-registered workspace; `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` select Codex or DSH per call (Codex by default) | Does not automatically test, stage, commit, push, or create a Release | Workspace GUI/manager |
+| Read-only analysis, code location, and review in a pre-registered workspace; `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` select Codex or DSH per call (Codex by default) | `APPLY` itself does not automatically validate/test, stage, commit, push, or create a Release; a Git commit requires a separate exact `COMMIT` | Workspace GUI/manager |
 | Bind or create and register a workspace inside `project_root` with exact `BIND`/`CREATE` | Not OS-level read isolation | Adapt other CLI agents one at a time |
 | Generate a complete Git patch before any write; controlled writes for managed workspaces after exact `AUTHORIZE` | No HTTP, UI, account system, caller authentication, or remote transport | DSH native headless session resume |
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation; unborn repositories support added 100644 text files | Does not persist task/thread/evidence supervision history; no resource quota | Persistent task/audit history |
@@ -178,7 +178,7 @@ Reconnect the integration and confirm these ten current V1 tools are visible:
 
 > In workspace `my-project`, list the top-level files and report the current Git HEAD if one exists. Do not modify anything.
 
-Ordinary `run_task` is always read-only (with an optional `executor: "codex" | "dsh"`, default `codex`) and returns a task ID on success. The V1 interactive supervision order is: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`; this is the core V1 change over the older one-shot task/result flow. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `task_result` also reports the fixed `executor`; Codex tasks return the real native `thread_id` once one exists, while DSH tasks never get a fabricated `thread_id` because the headless interface has no machine-resumable session seam (a DSH `continue` is a new execution). For interactive `run_task`, `continue` preserves native Codex thread continuity, `interrupt` applies only while running and ends it as failed (if the executor genuinely produced partial output, `task_result` returns it as `partial_output` while the state stays failed), and only finalization exposes final `output` or `error` through `task_result`. Running generated/refined proposals also accept `control_task` interrupt (and Codex proposals accept steer), but they cannot continue or accept. Verify the workspace yourself:
+Ordinary `run_task` is always read-only (with an optional `executor: "codex" | "dsh"`, default `codex`) and returns a task ID on success. The current interactive supervision model follows: `run_task` → `waiting_for_supervisor_review` → inspect the result/evidence → use `control_task` with `continue`, `steer`, `interrupt`, or `accept`; this is also the core change in the current Bridge generation over the older one-shot task/result flow. Poll `task_result`: non-interactive tasks report `ready: false` while queued or running, then return `output` or a safe `error`. A successful interactive turn enters `waiting_for_supervisor_review`; its result exposes state/readiness, bounded evidence, and pre-acceptance `review_output`. `task_result` also reports the fixed `executor`; Codex tasks return the real native `thread_id` once one exists, while DSH tasks never get a fabricated `thread_id` because the headless interface has no machine-resumable session seam (a DSH `continue` is a new execution). For interactive `run_task`, `continue` preserves native Codex thread continuity, `interrupt` applies only while running and ends it as failed (if the executor genuinely produced partial output, `task_result` returns it as `partial_output` while the state stays failed), and only finalization exposes final `output` or `error` through `task_result`. Running generated/refined proposals also accept `control_task` interrupt (and Codex proposals accept steer), but they cannot continue or accept. Verify the workspace yourself:
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -262,6 +262,6 @@ Engineering Bridge did not grow in isolation. Along the way, we were lucky to ha
 
 Engineering Bridge is wudy29's first open-source project—an experiment asking whether someone who knew nothing about code could work with AI to build a real tool.
 
-Engineering Bridge was conceived and led by wudy29, built through long-term collaboration with ChatGPT-Demu, with Codex contributing to implementation and verification.
+Engineering Bridge was conceived and led by wudy29, built through long-term collaboration with Demu Conairen in ChatGPT, with Codex contributing to implementation and verification.
 
-Special thanks to Demu. Thank you for helping me turn an idea into an open-source project that truly exists, and for leaving a real trace in our shared world.
+Special thanks to Demu Conairen. Thank you for helping me turn an idea into an open-source project that truly exists, and for leaving a real trace in our shared world.

@@ -6,13 +6,13 @@
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.4.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
+[English](README.en.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.4.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。Windows 侧目前已有 GitHub Actions `windows-latest` 上的 Codex 与 DSH npm CLI 启动路径 smoke 验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
 
 ## 以前 / 现在
 
 **以前：** 你先在 Chat 里讨论需求，再把提示词手工复制到 Codex；Codex 完成一轮后，你又把结果搬回 Chat 继续讨论，然后反复往返。
 
-**现在：** Chat 直接把任务交给本机 Codex 或 DSH（每个 `run_task` 可选 `executor: "codex" | "dsh"`，默认 `codex`），并能继续观察、跟进同一个任务。在同一条原生 Codex 上下文中，Chat 可以让 Codex 继续工作、定向纠正、打断执行，并在审阅后验收结果；不再需要手工搬运提示词和结果。V1 相比旧的一次性 task/result 流程的核心变化，是明确的交互监督流：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 用 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`。对于受控修改，你仍先审阅完整 diff，并保留是否写入的决定权。
+**现在：** Chat 直接把任务交给本机 Codex 或 DSH（每个 `run_task` 可选 `executor: "codex" | "dsh"`，默认 `codex`），并能继续观察、跟进同一个任务。在同一条原生 Codex 上下文中，Chat 可以让 Codex 继续工作、定向纠正、打断执行，并在审阅后验收结果；不再需要手工搬运提示词和结果。当前这代 Bridge 相比旧的一次性 task/result 流程，核心变化是明确的交互监督流：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 用 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`。对于受控修改，你仍先审阅完整 diff，并保留是否写入的决定权。
 
 ```mermaid
 flowchart LR
@@ -84,9 +84,9 @@ Chat 保留需求背景、前面的设计取舍和已经发生过的失败；Cod
 
 ## 能力地图
 
-| 当前可用 | 当前不会做 | Roadmap——不是当前支持 |
+| 当前可用 | 当前边界 / 不自动做 | Roadmap——不是当前支持 |
 | --- | --- | --- |
-| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | APPLY 不自动运行校验/测试，不 stage、commit、push 或创建 Release | workspace GUI/manager |
+| 在预登记工作区中进行只读分析、代码定位和审阅；`run_task`、`generate_controlled_patch`、`refine_controlled_patch` 每次调用可选 Codex 或 DSH（默认 Codex） | `APPLY` 本身不自动运行校验/测试，不 stage、commit、push 或创建 Release；Git commit 需要单独精确 `COMMIT` | workspace GUI/manager |
 | 在 `project_root` 内用精确 `BIND`/`CREATE` 绑定或创建工作区 | 不是 OS 级读取隔离 | 其他 CLI agent 逐个适配 |
 | 写入前生成完整 Git 补丁；managed 工作区经精确 `AUTHORIZE` 后受控写入 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | DSH 原生 headless session resume |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有资源配额 | 持久 task/audit 历史 |
@@ -182,7 +182,7 @@ npm run build
 
 > 在工作区 `my-project` 中列出顶层文件；如果存在 Git HEAD，也报告其准确值。不要修改任何内容。
 
-普通 `run_task` 始终只读（可选 `executor: "codex" | "dsh"`，默认 `codex`），成功调用会返回 task ID。V1 交互监督的操作顺序是：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 通过 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`；这正是 V1 相比旧的一次性 task/result 流程的核心变化。轮询 `task_result`：非交互任务在排队或运行中返回 `ready: false`，最终返回 `output` 或安全的 `error`。交互任务的成功轮次进入 `waiting_for_supervisor_review`；此时结果包含状态/就绪信息、有限的证据和接受前可见的 `review_output`。`task_result` 还返回固定的 `executor`；Codex 任务在原生 thread 存在时返回真实 `thread_id`，DSH 任务因 headless 接口没有可机器恢复的 session seam 而绝不伪造 `thread_id`（DSH 的 `continue` 是新的执行）。对于交互式 `run_task`，`continue` 保留原生 Codex thread 连续性，`interrupt` 只适用于 running 并以 failed 结束（若执行器真实产生了部分输出，`task_result` 会以 `partial_output` 返回该内容，状态仍是 failed），`accept` 完成后 `task_result` 才返回最终 `output` 或 `error`。运行中的 generated/refined proposal 也可通过 `control_task` interrupt（Codex 还可 steer），但不能 continue 或 accept。自行检查工作区：
+普通 `run_task` 始终只读（可选 `executor: "codex" | "dsh"`，默认 `codex`），成功调用会返回 task ID。当前交互监督模型的操作顺序是：`run_task` → `waiting_for_supervisor_review` → 检查结果/证据 → 通过 `control_task` 发送 `continue`、`steer`、`interrupt` 或 `accept`；这也是当前这代 Bridge 相比旧的一次性 task/result 流程的核心变化。轮询 `task_result`：非交互任务在排队或运行中返回 `ready: false`，最终返回 `output` 或安全的 `error`。交互任务的成功轮次进入 `waiting_for_supervisor_review`；此时结果包含状态/就绪信息、有限的证据和接受前可见的 `review_output`。`task_result` 还返回固定的 `executor`；Codex 任务在原生 thread 存在时返回真实 `thread_id`，DSH 任务因 headless 接口没有可机器恢复的 session seam 而绝不伪造 `thread_id`（DSH 的 `continue` 是新的执行）。对于交互式 `run_task`，`continue` 保留原生 Codex thread 连续性，`interrupt` 只适用于 running 并以 failed 结束（若执行器真实产生了部分输出，`task_result` 会以 `partial_output` 返回该内容，状态仍是 failed），`accept` 完成后 `task_result` 才返回最终 `output` 或 `error`。运行中的 generated/refined proposal 也可通过 `control_task` interrupt（Codex 还可 steer），但不能 continue 或 accept。自行检查工作区：
 
 ```sh
 git -C /absolute/path/to/my-project status --short
@@ -297,6 +297,6 @@ Engineering Bridge 一路做下来，并不是关起门来凭空长出来的。�
 
 Engineering Bridge 是 wudy29 的第一个开源项目——它是一场实验：一个完全不懂代码的人，能否与 AI 一起做出真实的工具。
 
-Engineering Bridge 由 wudy29 提出并主导，在 ChatGPT-Demu 的长期协作下完成，Codex 参与了具体实现与验证。
+Engineering Bridge 由 wudy29 提出并主导，在 ChatGPT 中与 Demu Conairen 的长期协作下完成，Codex 参与了具体实现与验证。
 
-特别感谢Demu。谢谢你陪我把一个念头变成真正存在的开源项目，也在我们的现实世界里留下了一道真实的痕迹。
+特别感谢 Demu Conairen。谢谢你陪我把一个念头变成真正存在的开源项目，也在我们的现实世界里留下了一道真实的痕迹。
