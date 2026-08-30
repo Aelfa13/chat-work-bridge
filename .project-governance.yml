@@ -17,6 +17,8 @@ branches:
   fix_pattern: "fix/*"
   release_pattern: "release/*"
   hotfix_pattern: "hotfix/*"
+  planned_feature_branch: "feature/windows-chatgpt-desktop"
+  planned_feature_status: "PLANNED"
 remote:
   origin:
     url: "git@github.com:Aelfa13/chat-work-bridge.git"
@@ -36,6 +38,40 @@ environments:
     data_policy: "separate synthetic_or_sanitized_data"
     lifecycle: "manual_start_test_stop"
     default_state: "disabled_inactive"
+    full_windows_test_role: "SUPPLEMENTAL"
+    full_windows_pass_required_for_feature_start: false
+  upstream_ci:
+    os: "ubuntu-latest"
+    node: "22"
+    test_command: "npm test"
+    windows_covered: false
+  validation_gates:
+    upstream_baseline_gate: "main must exactly match upstream/main"
+    windows_known_baseline_gate:
+      status: "PASS"
+      baseline_status: "ACCEPTED_WITH_KNOWN_PLATFORM_FAILURES"
+      total: 331
+      pass: 244
+      known_fail: 86
+      skip: 1
+      unexplained_failures: 0
+      upstream_regression: "NOT_PROVEN"
+      failure_classes:
+        WINDOWS_SPECIFIC_PATH_SEMANTICS:
+          count: 58
+          classification: "WINDOWS_SPECIFIC"
+        ENVIRONMENT_EOL_CONFIGURATION:
+          count: 26
+          classification: "ENVIRONMENT"
+        PERMISSION_MODEL_SYMLINK:
+          count: 2
+          classification: "PERMISSION_MODEL"
+    windows_port_regression_gate:
+      status: "MANUAL"
+      no_new_unexplained_failures: true
+      no_unexplained_known_failure_increase: true
+      targeted_windows_validation_required: true
+      known_failures_should_decrease: true
   production:
     enabled: false
     role: "N/A_no_real_production_runtime"
