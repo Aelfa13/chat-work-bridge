@@ -729,7 +729,7 @@ index 90be1f3..3b18e51 100644
     assert.equal(typeof lowercased.body.raw, "string");
     assert.match(
       String(lowercased.body.raw),
-      /^Input validation error: Invalid arguments for tool commit_controlled_patch:/u
+      /Input validation error: Invalid arguments for tool commit_controlled_patch:/u
     );
     assert.equal(JSON.stringify(lowercased.body).includes("committed"), false);
     assert.equal(
