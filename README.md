@@ -2,11 +2,11 @@
 
 **打通 Chat 与本地 Codex 与 Deepseek harness：不再搬提示词，Chat 直接调度、监督并验收 Codex 与 Deepseek harness。**
 
-[![v1.3.0](https://img.shields.io/badge/release-v1.3.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0)
+[![v1.4.0](https://img.shields.io/badge/release-v1.4.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **[v1.3.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.3.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
+[English](README.en.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.4.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。v1.2.1 的 Codex 与 DSH Windows npm CLI 启动路径已在 GitHub Actions `windows-latest` 上验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
 
 ## 以前 / 现在
 
@@ -53,7 +53,7 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **代码审阅：** “检查这段实现的可靠性风险，并给出依据，不要编辑文件。”
 - **受控修改：** “准备一份补丁来调整超时提示；先展示完整 diff，只有我精确回复 `APPLY` 后才写入。”
 
-受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** `apply_controlled_patch` 不会自动运行校验或测试，也不会 stage、commit、push 或发布。
+受控写入的原则很简单：**先展示 diff，只有精确 `APPLY` 后才写入。** `apply_controlled_patch` 不会自动运行校验或测试，也不会 stage、commit、push 或发布；如需把已 `APPLY` 的受控补丁提交到 Git 历史，再用同一个 `patch_task_id` 和精确 `COMMIT` 调用 `commit_controlled_patch`。它只创建该受控补丁的一个 commit，绝不 push。
 
 ## 为什么通过 Chat 控制本地 Agent？
 
@@ -63,6 +63,20 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 - **执行配置保留选择。** Codex 的模型与供应商配置带来选择和灵活性，但不承诺执行成本更低。
 - **人保留最终权限。** 你决定补丁是否写入，也决定是否测试、提交、推送或发布。
 - **当前实现 Codex 与 DSH 两个执行器。** `run_task`、`generate_controlled_patch`、`refine_controlled_patch` 都接受可选 `executor: "codex" | "dsh"`（默认 `codex`）；执行器在每次调用时选择，`refine_controlled_patch` 不继承父提案的执行器。Codex 调用还可选 `model` 与 `reasoning_effort`，并按 Codex `model/list` 校验；DSH 不接受这两个选项。`apply_controlled_patch` 没有执行器/模型调用，由 Bridge 自行校验并应用。其他 CLI agent 仍是未来逐个适配的方向，并非当前支持，但原理上皆通。
+
+### 为什么还要让 Chat 监督一层？
+
+Engineering Bridge 并不是为了让 Chat 多套一层流程，也不是因为 Codex 或 DSH 不能独立完成施工。恰恰相反，本地 Agent 往往执行得更快；如果唯一目标只是“尽快把代码写出来”，直接让 Agent 连续施工会更省时间。
+
+Bridge 选择牺牲一部分速度，是为了换取一次额外的观察、复核和纠偏机会。
+
+Chat 保留需求背景、前面的设计取舍和已经发生过的失败；Codex / DSH 则进入真实工作区，查看代码、运行命令并完成具体施工。一次执行结束以后，结果不会天然被当成正确答案，而是重新回到对话里接受检查：有没有漏掉约束？有没有偏离原目标？有没有为了处理一个小问题顺手造出一套过度复杂的系统？证据是否真的支持“已经完成”？有没有出现 scope creep、架构漂移，或者只是因为 Agent 已经投入很多工作，就一路沿着错误方向继续下去？
+
+这种 **planner / reviewer 与 executor 分离** 的设计，故意制造了一个反馈回路：`理解目标 → 本地执行 → 带回真实证据 → Chat 复核 → 纠偏或继续`。
+
+它确实比单个 Agent 一口气施工更慢，但我们更看重最终产出的可靠性、边界感和一致性。Bridge 想优化的不是“每一分钟写多少代码”，而是**在真实工程里少走错路，并让每一次继续施工都有新的证据支撑。**
+
+这也是 Engineering Bridge 和单纯“给 AI 一双本地手臂”的工具最重要的区别之一：本地执行能力只是其中一半，另一半是让执行过程持续接受来自对话上下文的监督、反思和校正。
 
 ## 一个真实案例
 
@@ -76,9 +90,10 @@ Engineering Bridge 是一个在你电脑上运行的小型“工程桥梁”。�
 | 在 `project_root` 内用精确 `BIND`/`CREATE` 绑定或创建工作区 | 不是 OS 级读取隔离 | 其他 CLI agent 逐个适配 |
 | 写入前生成完整 Git 补丁；managed 工作区经精确 `AUTHORIZE` 后受控写入 | 没有 HTTP、UI、账号系统、调用方认证或远程传输 | DSH 原生 headless session resume |
 | 仅在精确 `APPLY` 后应用，并重新校验 base HEAD 与仓库状态；支持 unborn 仓库新增 100644 文本文件 | 不持久化 task/thread/evidence 监督历史；没有资源配额 | 持久 task/audit 历史 |
+| 对已 `APPLY` 的受控补丁仅在精确 `COMMIT` 后创建一个 Git commit；Bridge 绝不 push | 不会自动发布或创建 Release | — |
 | 每个已登记工作区最多一个固定校验 profile（精确 `CONFIGURE`），对保留提案按需 `validate_controlled_patch`（PASS/FAIL/INCOMPLETE） | 校验不是主机级沙箱；临时 worktree 只隔离已登记工作区 | — |
 | 受控补丁提案/应用历史、managed 工作区目录与 validation profile 跨重启保留 | — | 谨慎探索多 agent 编排 |
-| 通过 STDIO 提供十二个本地 MCP 工具 | — | — |
+| 通过 STDIO 提供十三个本地 MCP 工具 | — | — |
 
 ## Quick Start
 
@@ -102,7 +117,7 @@ npm install
 npm run build
 ```
 
-当前 v1.3.0 没有一键安装器。
+当前 v1.4.0 没有一键安装器。
 
 ### 3. 登记工作区
 
@@ -264,12 +279,19 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到十二个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **看不到十三个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node`、`codex` 或 `dsh`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这些可执行文件的路径。
 - **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
 - **受控写入被拒绝：** 检查受控写权限（manual `allow_write` 或 managed `AUTHORIZE`）、Git 顶层与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
 - **手动启动后看似卡住：** 这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
 - **任务长时间不结束：** 执行器运行、Codex protocol inactivity 与短 RPC 都有上述 bounds；正在运行的任务也可通过 `control_task(action: "interrupt")` 显式中断。重启 Bridge 会按设计丢弃任务监督状态，受控补丁提案与 managed 工作区目录会保留。
+
+## 致谢
+
+Engineering Bridge 一路做下来，并不是关起门来凭空长出来的。很幸运，在我们不断试错、补漏洞、重新审视设计的时候，有朋友愿意把自己的项目、经验和踩过的坑摊开来和我们讨论。很多后来真正落进 Bridge 的判断，也是在这些交流里被提醒、被照亮，然后再慢慢长成了属于 Bridge 自己的样子。
+
+- 很感谢 [@molingsss](https://github.com/molingsss) 分享 Local Mechanic / qiyinchen Mechanic，也愿意陪我认真讨论其中的设计。qiyinchen Mechanic 在短 Codex RPC 的独立 timeout、validation isolation / separation，以及后来 `submit_controlled_patch` 的产品思路上给了我们很直接的启发。Bridge 最终没有照搬这些实现，而是顺着这些提醒，在自己的安全边界和 controlled-patch 体系里重新做了一遍。但那些“原来这里还能这样想”的时刻，是真的来自这次分享。
+- 也很感谢 [@Asccccyn](https://github.com/Asccccyn) 把 DevSpace / engineering-arm 相关的实践和经验分享给我。她让我第一次更认真地去看 controlled write 在 crash、恢复、并发和持久化之间到底会发生什么，也推动我们后来把 lifecycle、recovery 和 bounded execution 做得更扎实。更想感谢的是，她愿意把自己看到的东西和踩过的坑拿出来，让我们少走了一些弯路。
 
 ## 项目故事
 

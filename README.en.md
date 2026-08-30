@@ -2,11 +2,11 @@
 
 **Connect Chat directly to local Codex or DSH: no more shuttling prompts and results—Chat dispatches, supervises, and accepts the executor's work.**
 
-[![v1.3.0](https://img.shields.io/badge/release-v1.3.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0)
+[![v1.4.0](https://img.shields.io/badge/release-v1.4.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.3.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.3.0) · V1 · Local · Continuously maintainer-tested on macOS.** The v1.3.0 tag and GitHub Release have been published; this does not indicate npm publication. The v1.2.1 Codex and DSH Windows npm CLI launch path has been verified on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
+[简体中文](README.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · Local · Continuously maintainer-tested on macOS.** The v1.4.0 tag and GitHub Release have been published; this does not indicate npm publication. The v1.2.1 Codex and DSH Windows npm CLI launch path has been verified on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
 
 ## Before / now
 
@@ -53,7 +53,7 @@ There are four roles:
 - **Code review:** “Review this implementation for reliability risks and show your evidence without editing files.”
 - **Controlled change:** “Prepare a patch that adjusts the timeout message; show the complete diff first, and write only after my exact `APPLY`.”
 
-The controlled-write rule is simple: **show the diff first, write only after exact `APPLY`.** Bridge does not automatically test, stage, commit, push, or release.
+The controlled-write rule is simple: **show the diff first, write only after exact `APPLY`.** `apply_controlled_patch` does not automatically validate or test, stage, commit, push, or release. To commit an already-`APPLY`ed controlled patch, call `commit_controlled_patch` with the same `patch_task_id` and exact `COMMIT`; it creates only that controlled commit and never pushes.
 
 ## Why control a local agent through chat?
 
@@ -63,6 +63,20 @@ The controlled-write rule is simple: **show the diff first, write only after exa
 - **Execution remains configurable.** Codex model and provider configuration offers choice and flexibility; it is not a promise that execution will be cheaper.
 - **The human keeps authority.** You decide whether a patch is written and whether anything is tested, committed, pushed, or released.
 - **Two executors are implemented: Codex and DSH.** `run_task`, `generate_controlled_patch`, and `refine_controlled_patch` each accept an optional `executor: "codex" | "dsh"` (default `codex`); the executor is selected per call, and `refine_controlled_patch` does not inherit the parent proposal's executor. Codex calls also accept optional `model` and `reasoning_effort`, validated against Codex `model/list`; DSH rejects those two options. `apply_controlled_patch` has no executor/model call—Bridge validates and applies the patch itself. Other CLI agents remain a future, adapter-by-adapter direction—not current support.
+
+### Why add a Chat supervision layer?
+
+Engineering Bridge is not adding another layer just for process, and it is not built on the assumption that Codex or DSH cannot work independently. In fact, a local agent is often faster on its own; if the only goal is to get code written as quickly as possible, letting the agent keep building without interruption will usually win on speed.
+
+Bridge deliberately gives up some of that speed in exchange for another opportunity to observe, review, and correct the work.
+
+Chat retains the requirements, earlier design trade-offs, and the failures already encountered. Codex / DSH enters the real workspace, inspects code, runs commands, and carries out the concrete work. When an execution finishes, its result is not treated as correct by default; it comes back into the conversation to be challenged again: did we miss a constraint? drift away from the original goal? build an overly complicated system to solve a small problem? does the evidence really support “done”? did scope creep or architectural drift appear, or are we continuing down a bad path simply because the agent has already invested effort in it?
+
+This separation between **planner / reviewer and executor** intentionally creates a feedback loop: `understand the goal → local execution → bring back real evidence → Chat review → correct or continue`.
+
+It is slower than letting one agent build straight through, but we care more about the reliability, boundaries, and consistency of the final result. Bridge is not trying to optimize “lines of code per minute”; it is trying to **reduce wrong turns in real engineering work, and make every decision to continue depend on fresh evidence.**
+
+That is also one of the most important differences between Engineering Bridge and a tool that simply “gives AI local hands”: local execution is only half of the design. The other half is keeping that execution under continuing supervision, reflection, and correction from the conversational context.
 
 ## A real project example
 
@@ -236,6 +250,13 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 - **Controlled write refused:** check the controlled-write permission (manual `allow_write` or managed `AUTHORIZE`), the Git top-level, and a clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
 - **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
 - **A task runs for a long time:** executor runs, Codex protocol inactivity, and short RPC calls have the bounds above; a running task can also be explicitly interrupted through `control_task(action: "interrupt")`. Restarting Bridge discards task supervision state by design; controlled-patch proposals and the managed workspace catalog are retained.
+
+## Acknowledgements
+
+Engineering Bridge did not grow in isolation. Along the way, we were lucky to have friends willing to share their projects, experience, and hard-won lessons while we were still testing ideas, finding gaps, and rethinking the design. Several decisions that later became part of Bridge started as moments in those conversations that made us stop and see the problem differently.
+
+- Many thanks to [@molingsss](https://github.com/molingsss) for sharing Local Mechanic / qiyinchen Mechanic and taking the time to discuss its design with me. qiyinchen Mechanic directly influenced our later thinking around bounded short Codex RPC timeouts, validation isolation / separation, and the product idea behind `submit_controlled_patch`. Bridge ultimately rebuilt those ideas inside its own safety boundaries and controlled-patch architecture, but those “we can think about this differently” moments genuinely came from that sharing.
+- Many thanks as well to [@Asccccyn](https://github.com/Asccccyn) for sharing DevSpace / engineering-arm experience and lessons. She pushed me to look much more seriously at what controlled writes mean across crashes, recovery, concurrency, and persistence, and those conversations helped us make Bridge's lifecycle, recovery, and bounded execution much more robust. More than anything, I am grateful that she was willing to share what she had seen and the problems she had already run into, so we could avoid some wrong turns of our own.
 
 ## Project story
 
