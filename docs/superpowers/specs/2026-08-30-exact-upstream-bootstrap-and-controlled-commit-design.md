@@ -196,8 +196,18 @@ Before staging anything, COMMIT must prove:
 - canonical workspace identity/root still match the proposal;
 - current `HEAD` still equals the proposal's original base HEAD;
 - index is initially clean;
-- current worktree changes correspond exactly to the proposal's `changed_paths`;
-- no unrelated tracked, untracked, or staged path can enter the commit;
+- current tracked worktree changes and patch-added untracked targets correspond exactly to
+  the retained proposal's `changed_paths`;
+- no unrelated tracked or staged path exists;
+- any pre-existing unignored untracked path outside `changed_paths` has been enumerated at
+  file level under the workspace lock and safely fingerprinted; regular files require stable
+  type/stat metadata plus a streamed content digest, symlinks require stable link text, and
+  unsupported special files fail closed;
+- ignored paths remain outside this recovery-anchor snapshot;
+- tracked gitlink worktrees are scan boundaries: the special-path scanner does not recurse into
+  them or apply superproject ignore rules to their contents;
+- no unrelated path can enter the commit, and no snapshotted unrelated untracked path may be
+  observed as added, removed, modified, or replaced at a later verification checkpoint;
 - the applied proposal content is still present, using the retained proposal output and
   reverse-apply or an equivalent fail-closed verification.
 
@@ -230,12 +240,17 @@ The allowed sequence is:
 ```text
 revalidate applied proposal and workspace
   -> prove index clean
-  -> prove dirty path set == proposal changed_paths
-  -> git add -- <exact proposal changed_paths>
+  -> separate tracked targets, patch-added untracked targets, and unrelated untracked paths
+  -> snapshot pre-existing unrelated untracked paths under the workspace lock
+  -> prove controlled dirty path set == proposal changed_paths
+  -> stage the exact retained patch into the index
   -> re-read index
   -> require staged path set == exact allowlist
+  -> require tracked worktree content == staged retained patch content
+  -> reverify unrelated untracked path set and fingerprints
   -> fixed non-interactive git commit
-  -> read and verify new HEAD
+  -> read and verify new HEAD, commit metadata, clean index/tracked targets, and the unchanged
+     unrelated untracked snapshot
   -> return commit SHA
 ```
 
@@ -247,10 +262,16 @@ COMMIT creates exactly one new commit and never pushes.
 
 ### 4.5 Failure semantics
 
-Wrong gate, wrong proposal state, lost authorization, changed base HEAD, unrelated dirt,
-pre-existing staged content, invalid message, missing Git identity, failed staging,
-failed commit, hook/signing/interactive requirements, or post-commit verification mismatch
-must fail closed.
+Wrong gate, wrong proposal state, lost authorization, changed base HEAD, unrelated tracked or
+staged dirt, unsafe untracked state, any change to the unrelated-untracked snapshot, invalid
+message, missing Git identity, failed staging, failed commit, hook/signing/interactive
+requirements, or post-commit verification mismatch must fail closed.
+
+Here, fail closed describes the returned verification result, not an atomic Git-history or
+filesystem rollback. If `git commit` succeeds but a final recovery-anchor verification fails,
+COMMIT returns `WORKSPACE_PRECONDITION_FAILED` while `HEAD` remains advanced to the new child
+commit. Bridge does not reset, rewrite, or otherwise roll back that commit. A retry of the same
+retained proposal then fails the original-base-HEAD precondition without creating another commit.
 
 If staging succeeds but commit fails, Bridge must leave the repository in an observable,
 bounded state and must not silently widen the staged set. Cleanup may reset only the staging
@@ -313,7 +334,8 @@ At minimum:
 3. missing write authorization fails;
 4. base HEAD changed fails;
 5. pre-existing staged content fails;
-6. unrelated tracked/untracked dirt fails;
+6. unrelated tracked or staged dirt fails, while stable pre-existing unrelated untracked files
+   are preserved and cannot enter the commit;
 7. invalid message fails;
 8. only proposal `changed_paths` are staged;
 9. applied proposal content must still match retained proposal;
@@ -323,6 +345,14 @@ At minimum:
 13. success advances HEAD by exactly one commit and returns that SHA;
 14. no push is invoked;
 15. regression: APPLY by itself still never stages or commits.
+16. modifying, deleting, replacing, or adding an unrelated untracked path during COMMIT fails
+    closed, and patch-added untracked targets remain controlled proposal paths rather than
+    recovery-anchor snapshot entries.
+17. if the commit succeeds but final recovery-anchor verification fails, the call returns
+    `WORKSPACE_PRECONDITION_FAILED` while HEAD remains the one new child commit containing exactly
+    the proposal paths, the index and tracked worktree are clean, and retry creates no commit.
+18. an existing tracked gitlink worktree is a special-path scan boundary; COMMIT does not recurse
+    into it with superproject ignore rules.
 
 ## 7. Rejected alternatives
 
@@ -360,7 +390,8 @@ Out of scope:
 - remote-management UI/API;
 - credentials or private-upstream authentication;
 - floating tags/branches/latest selection;
-- submodules;
+- recursive submodule bootstrap or controlled-patch changes to gitlinks (an existing tracked
+  gitlink worktree remains a COMMIT scan boundary);
 - re-bootstrap or migration of existing workspaces;
 - workspace lifecycle refactor;
 - new task/proposal state machine;

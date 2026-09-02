@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
-import { lstat, readFile, realpath, rename, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import type { BigIntStats } from "node:fs";
+import { lstat, open, readFile, readdir, readlink, realpath, rename, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, posix, resolve } from "node:path";
 
 import { CoreError } from "../core/errors.js";
@@ -387,8 +390,23 @@ export class ControlledPatchService {
       "-z",
       "--"
     ]));
-    const actualDirty = [...new Set([...trackedDirty, ...untrackedDirty])].sort();
-    if (!sameStrings(actualDirty, targets)) {
+    const targetSet = new Set(targets);
+    const controlledUntracked = untrackedDirty.filter((path) => targetSet.has(path));
+    const unrelatedUntracked = untrackedDirty.filter((path) => !targetSet.has(path)).sort();
+    const controlledDirty = [...new Set([...trackedDirty, ...controlledUntracked])].sort();
+    if (!sameStrings(controlledDirty, targets)) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    const unrelatedUntrackedSnapshot = await fingerprintUntrackedPaths(
+      proposal.workspaceRoot,
+      unrelatedUntracked
+    );
+    const untrackedBefore = [...untrackedDirty].sort();
+    await this.assertNoUnignoredSpecialPaths(proposal.workspaceRoot);
+    if (!sameStrings(
+      await this.listUntrackedPaths(proposal.workspaceRoot),
+      untrackedBefore
+    )) {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     }
     if (!(await this.applyCheck(proposal.workspaceRoot, patch, true))) {
@@ -397,9 +415,19 @@ export class ControlledPatchService {
 
     await this.git(proposal.workspaceRoot, ["var", "GIT_AUTHOR_IDENT"]);
     await this.git(proposal.workspaceRoot, ["var", "GIT_COMMITTER_IDENT"]);
+    await this.verifyUntrackedSnapshot(
+      proposal.workspaceRoot,
+      untrackedBefore,
+      unrelatedUntrackedSnapshot
+    );
 
     try {
-      await this.git(proposal.workspaceRoot, ["add", "--", ...targets]);
+      await this.git(proposal.workspaceRoot, [
+        "apply",
+        "--cached",
+        "--recount",
+        "--unidiff-zero"
+      ], patch);
       const stagedAfter = splitNul(await this.git(proposal.workspaceRoot, [
         "diff",
         "--cached",
@@ -407,6 +435,15 @@ export class ControlledPatchService {
         "-z"
       ])).sort();
       if (!sameStrings(stagedAfter, targets)) {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
+      const unstagedAfter = splitNul(await this.git(proposal.workspaceRoot, [
+        "diff",
+        "--name-only",
+        "-z",
+        "--"
+      ]));
+      if (unstagedAfter.length !== 0) {
         throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       }
     } catch (error) {
@@ -485,20 +522,111 @@ export class ControlledPatchService {
       "-z",
       "--"
     ]));
-    const untrackedFinal = splitNul(await this.git(proposal.workspaceRoot, [
+    const finalHead = (await this.git(proposal.workspaceRoot, ["rev-parse", "HEAD"])).trim();
+    if (stagedFinal.length !== 0 || trackedFinal.length !== 0 ||
+        finalHead !== commitSha) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    await this.verifyUntrackedSnapshot(
+      proposal.workspaceRoot,
+      unrelatedUntracked,
+      unrelatedUntrackedSnapshot
+    );
+
+    return { patch_task_id: taskId, committed: true, commit_sha: commitSha };
+  }
+
+  private async listUntrackedPaths(workspaceRoot: string): Promise<string[]> {
+    return splitNul(await this.git(workspaceRoot, [
       "ls-files",
       "--others",
       "--exclude-standard",
       "-z",
       "--"
-    ]));
-    const finalHead = (await this.git(proposal.workspaceRoot, ["rev-parse", "HEAD"])).trim();
-    if (stagedFinal.length !== 0 || trackedFinal.length !== 0 ||
-        untrackedFinal.length !== 0 || finalHead !== commitSha) {
+    ])).sort();
+  }
+
+  private async verifyUntrackedSnapshot(
+    workspaceRoot: string,
+    expectedPaths: readonly string[],
+    expectedFingerprints: readonly UntrackedPathFingerprint[]
+  ): Promise<void> {
+    await this.assertNoUnignoredSpecialPaths(workspaceRoot);
+    const paths = await this.listUntrackedPaths(workspaceRoot);
+    if (!sameStrings(paths, expectedPaths)) {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     }
+    const fingerprints = await fingerprintUntrackedPaths(
+      workspaceRoot,
+      expectedFingerprints.map(({ path }) => path)
+    );
+    if (!sameUntrackedFingerprints(fingerprints, expectedFingerprints) ||
+        !sameStrings(await this.listUntrackedPaths(workspaceRoot), expectedPaths)) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    await this.assertNoUnignoredSpecialPaths(workspaceRoot);
+  }
 
-    return { patch_task_id: taskId, committed: true, commit_sha: commitSha };
+  private async assertNoUnignoredSpecialPaths(workspaceRoot: string): Promise<void> {
+    const gitDirectory = resolve(
+      workspaceRoot,
+      (await this.git(workspaceRoot, ["rev-parse", "--git-dir"])).trim()
+    );
+    const trackedGitlinks = new Set(
+      splitNul(await this.git(workspaceRoot, ["ls-files", "--stage", "-z", "--"]))
+        .flatMap((entry) => {
+          const separator = entry.indexOf("\t");
+          return separator !== -1 && entry.startsWith("160000 ")
+            ? [entry.slice(separator + 1)]
+            : [];
+        })
+    );
+    await this.scanDirectoryForSpecialPaths(workspaceRoot, "", gitDirectory, trackedGitlinks);
+  }
+
+  private async scanDirectoryForSpecialPaths(
+    workspaceRoot: string,
+    directory: string,
+    gitDirectory: string,
+    trackedGitlinks: ReadonlySet<string>
+  ): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(resolve(workspaceRoot, directory), { withFileTypes: true });
+    } catch {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    const directories: string[] = [];
+    const specialPaths: string[] = [];
+    for (const entry of entries) {
+      const path = directory.length === 0 ? entry.name : posix.join(directory, entry.name);
+      if (resolve(workspaceRoot, path) === gitDirectory) continue;
+      if (trackedGitlinks.has(path)) continue;
+      if (entry.isDirectory()) directories.push(path);
+      else if (!entry.isFile() && !entry.isSymbolicLink()) specialPaths.push(path);
+    }
+    const ignored = await this.ignoredPathSet(workspaceRoot, [...directories, ...specialPaths]);
+    if (specialPaths.some((path) => !ignored.has(path))) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    for (const path of directories) {
+      if (!ignored.has(path)) {
+        await this.scanDirectoryForSpecialPaths(workspaceRoot, path, gitDirectory, trackedGitlinks);
+      }
+    }
+  }
+
+  private async ignoredPathSet(workspaceRoot: string, paths: readonly string[]): Promise<Set<string>> {
+    if (paths.length === 0) return new Set();
+    const result = await this.gitResult(
+      workspaceRoot,
+      ["check-ignore", "-z", "--stdin"],
+      `${paths.join("\0")}\0`
+    );
+    if (result.code !== 0 && result.code !== 1) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    return new Set(splitNul(result.stdout));
   }
 
   private async unstageCommittedPathsIfHeadRemainsBase(
@@ -924,6 +1052,99 @@ function splitNul(value: string): string[] {
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length &&
     left.every((value, index) => value === right[index]);
+}
+
+type UntrackedPathFingerprint = {
+  path: string;
+  kind: "file" | "symlink";
+  metadata: string;
+  content: string;
+};
+
+async function fingerprintUntrackedPaths(
+  workspaceRoot: string,
+  paths: readonly string[]
+): Promise<UntrackedPathFingerprint[]> {
+  const fingerprints: UntrackedPathFingerprint[] = [];
+  for (const path of paths) {
+    fingerprints.push(await fingerprintUntrackedPath(workspaceRoot, path));
+  }
+  return fingerprints;
+}
+
+async function fingerprintUntrackedPath(
+  workspaceRoot: string,
+  path: string
+): Promise<UntrackedPathFingerprint> {
+  try {
+    const absolutePath = resolveUntrackedPath(workspaceRoot, path);
+    const before = await lstat(absolutePath, { bigint: true });
+    const metadata = stableFileMetadata(before);
+    if (before.isSymbolicLink()) {
+      const linkText = await readlink(absolutePath, { encoding: "buffer" });
+      const after = await lstat(absolutePath, { bigint: true });
+      if (stableFileMetadata(after) !== metadata) failPatch();
+      return { path, kind: "symlink", metadata, content: linkText.toString("base64") };
+    }
+    if (!before.isFile() || typeof constants.O_NOFOLLOW !== "number") failPatch();
+
+    const handle = await open(absolutePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+    try {
+      const opened = await handle.stat({ bigint: true });
+      if (!opened.isFile() || stableFileMetadata(opened) !== metadata) failPatch();
+      const hash = createHash("sha256");
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      let position = 0;
+      for (;;) {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        if (bytesRead === 0) break;
+        hash.update(buffer.subarray(0, bytesRead));
+        position += bytesRead;
+      }
+      const openedAfter = await handle.stat({ bigint: true });
+      const pathAfter = await lstat(absolutePath, { bigint: true });
+      if (stableFileMetadata(openedAfter) !== metadata ||
+          stableFileMetadata(pathAfter) !== metadata) failPatch();
+      return { path, kind: "file", metadata, content: hash.digest("hex") };
+    } finally {
+      await handle.close().catch((): void => {});
+    }
+  } catch (error) {
+    if (error instanceof CoreError) throw error;
+    throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+  }
+}
+
+function resolveUntrackedPath(workspaceRoot: string, path: string): string {
+  if (path.length === 0 || isAbsolute(path) || path.split("/").includes("..") ||
+      posix.normalize(path) !== path) failPatch();
+  return resolve(workspaceRoot, path);
+}
+
+function stableFileMetadata(stats: BigIntStats): string {
+  return [
+    stats.dev,
+    stats.ino,
+    stats.mode,
+    stats.nlink,
+    stats.uid,
+    stats.gid,
+    stats.size,
+    stats.mtimeNs,
+    stats.ctimeNs
+  ].join(":");
+}
+
+function sameUntrackedFingerprints(
+  left: readonly UntrackedPathFingerprint[],
+  right: readonly UntrackedPathFingerprint[]
+): boolean {
+  return left.length === right.length && left.every((value, index) => {
+    const expected = right[index];
+    return expected !== undefined && value.path === expected.path &&
+      value.kind === expected.kind && value.metadata === expected.metadata &&
+      value.content === expected.content;
+  });
 }
 
 type PatchTarget = { path: string; kind: "modified" | "added" };

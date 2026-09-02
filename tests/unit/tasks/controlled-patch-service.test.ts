@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -146,6 +146,17 @@ async function appliedFixture(
     confirmation: "APPLY"
   });
   return { ...current, taskId: generated.taskId };
+}
+
+function mutateBeforeCommit(mutate: () => void): GitStarter {
+  let mutated = false;
+  return (executable, args, options) => {
+    if (!mutated && executable === "git" && args.includes("commit")) {
+      mutated = true;
+      mutate();
+    }
+    return spawn(executable, args, options);
+  };
 }
 
 const markdownFencePatch = [
@@ -703,29 +714,364 @@ test("COMMIT rejects a nonempty index before staging", async () => {
   }
 });
 
-test("COMMIT rejects unrelated tracked or untracked dirt", async () => {
-  for (const kind of ["tracked", "untracked"] as const) {
-    const root = repository();
-    try {
-      if (kind === "tracked") {
-        writeFileSync(join(root, "other.txt"), "base\n");
-        git(root, "add", "other.txt");
-        git(root, "commit", "-qm", "add other");
-      }
-      const { controlled, taskId } = await appliedFixture(root);
-      writeFileSync(join(root, "other.txt"), "dirty\n");
+test("COMMIT rejects unrelated tracked dirt", async () => {
+  const root = repository();
+  try {
+    writeFileSync(join(root, "other.txt"), "base\n");
+    git(root, "add", "other.txt");
+    git(root, "commit", "-qm", "add other");
+    const { controlled, taskId } = await appliedFixture(root);
+    writeFileSync(join(root, "other.txt"), "dirty\n");
 
-      await expectCode(
-        () => controlled.commit({
-          patch_task_id: taskId,
-          message: "feat: commit patch",
-          confirmation: "COMMIT"
-        }),
-        "WORKSPACE_PRECONDITION_FAILED"
-      );
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT preserves a pre-existing unrelated untracked file", async () => {
+  const root = repository();
+  const anchorPath = "docs/operations/recovery-anchor.md";
+  try {
+    mkdirSync(join(root, "docs", "operations"), { recursive: true });
+    writeFileSync(join(root, anchorPath), "recovery anchor\n");
+    const { controlled, taskId } = await appliedFixture(root);
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: commit patch",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "note.txt"
+    );
+    assert.equal(readFileSync(join(root, anchorPath), "utf8"), "recovery anchor\n");
+    assert.equal(
+      git(root, "ls-files", "--others", "--exclude-standard").trim(),
+      anchorPath
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(git(root, "diff", "--name-only"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT separates an untracked patch target from unrelated untracked files", async () => {
+  const root = repository();
+  const anchorPath = "recovery-anchor.md";
+  try {
+    writeFileSync(join(root, anchorPath), "anchor\n");
+    const { controlled, taskId } = await appliedFixture(root, additionPatch);
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: commit added file",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "added.txt"
+    );
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(readFileSync(join(root, anchorPath), "utf8"), "anchor\n");
+    assert.equal(
+      git(root, "ls-files", "--others", "--exclude-standard").trim(),
+      anchorPath
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT preserves NUL-enumerated unrelated files and symlinks", async () => {
+  const root = repository();
+  const directory = join(root, "anchors");
+  const fileName = "recovery\nanchor.md";
+  try {
+    mkdirSync(directory);
+    writeFileSync(join(directory, fileName), "anchor\n");
+    symlinkSync("missing-target", join(directory, "recovery-link"));
+    const { controlled, taskId } = await appliedFixture(root);
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: commit patch",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(readFileSync(join(directory, fileName), "utf8"), "anchor\n");
+    assert.equal(readlinkSync(join(directory, "recovery-link")), "missing-target");
+    assert.deepEqual(
+      git(root, "ls-files", "--others", "--exclude-standard", "-z").split("\0").filter(Boolean),
+      [`anchors/${fileName}`, "anchors/recovery-link"]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT leaves ignored untracked state outside the recovery-anchor snapshot", async () => {
+  const root = repository();
+  const ignoredPath = join(root, "ignored", "cache.txt");
+  try {
+    writeFileSync(join(root, ".gitignore"), "ignored/\n");
+    git(root, "add", ".gitignore");
+    git(root, "commit", "-qm", "ignore cache");
+    mkdirSync(join(root, "ignored"));
+    writeFileSync(ignoredPath, "before\n");
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => writeFileSync(ignoredPath, "after\n"))
+    );
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: commit patch",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(readFileSync(ignoredPath, "utf8"), "after\n");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT reports post-commit verification failure without rolling back and retry is deterministic", async () => {
+  const root = repository();
+  const anchorPath = join(root, "recovery-anchor.md");
+  try {
+    writeFileSync(anchorPath, "before\n");
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => writeFileSync(anchorPath, "after\n"))
+    );
+    const beforeHead = git(root, "rev-parse", "HEAD").trim();
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    const committedHead = git(root, "rev-parse", "HEAD").trim();
+    assert.notEqual(committedHead, beforeHead);
+    assert.equal(git(root, "rev-parse", "HEAD^").trim(), beforeHead);
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "note.txt"
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(git(root, "diff", "--name-only"), "");
+    assert.equal(readFileSync(anchorPath, "utf8"), "after\n");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), "recovery-anchor.md");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), committedHead);
+    assert.equal(git(root, "rev-parse", "HEAD^").trim(), beforeHead);
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "note.txt"
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(git(root, "diff", "--name-only"), "");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), "recovery-anchor.md");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT fails closed when a pre-existing unrelated untracked file is deleted", async () => {
+  const root = repository();
+  const anchorPath = join(root, "recovery-anchor.md");
+  try {
+    writeFileSync(anchorPath, "anchor\n");
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => rmSync(anchorPath, { force: true }))
+    );
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT fails closed when a new unrelated untracked file appears", async () => {
+  const root = repository();
+  const anchorPath = join(root, "recovery-anchor.md");
+  const newPath = join(root, "new-untracked.txt");
+  try {
+    writeFileSync(anchorPath, "anchor\n");
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => writeFileSync(newPath, "new\n"))
+    );
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(readFileSync(anchorPath, "utf8"), "anchor\n");
+    assert.equal(readFileSync(newPath, "utf8"), "new\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT fails closed when a pre-existing unrelated untracked file is replaced", async () => {
+  const root = repository();
+  const anchorPath = join(root, "recovery-anchor.md");
+  try {
+    writeFileSync(anchorPath, "same content\n");
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => {
+        rmSync(anchorPath, { force: true });
+        writeFileSync(anchorPath, "same content\n");
+      })
+    );
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT fails closed when a pre-existing unrelated untracked symlink is replaced", async () => {
+  const root = repository();
+  const anchorPath = join(root, "recovery-anchor-link");
+  try {
+    symlinkSync("missing-before", anchorPath);
+    const { controlled, taskId } = await appliedFixture(
+      root,
+      validPatch,
+      mutateBeforeCommit(() => {
+        rmSync(anchorPath, { force: true });
+        symlinkSync("missing-after", anchorPath);
+      })
+    );
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT rejects an unrelated untracked special file", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = repository();
+  try {
+    execFileSync("mkfifo", [join(root, "recovery-anchor.fifo")]);
+    const { controlled, taskId } = await appliedFixture(root);
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT treats a tracked gitlink worktree as a special-path scan boundary", {
+  skip: process.platform === "win32"
+}, async () => {
+  const root = repository();
+  const submoduleRoot = repository();
+  const submodulePath = join(root, "vendor", "dependency");
+  try {
+    writeFileSync(join(submoduleRoot, ".gitignore"), "recovery-anchor.fifo\n");
+    git(submoduleRoot, "add", ".gitignore");
+    git(submoduleRoot, "commit", "-qm", "ignore local recovery anchor");
+    git(
+      root,
+      "-c",
+      "protocol.file.allow=always",
+      "submodule",
+      "add",
+      "-q",
+      submoduleRoot,
+      "vendor/dependency"
+    );
+    git(root, "commit", "-qm", "add tracked submodule");
+    execFileSync("mkfifo", [join(submodulePath, "recovery-anchor.fifo")]);
+    const { controlled, taskId } = await appliedFixture(root);
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "feat: commit patch",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.committed, true);
+    assert.equal(
+      git(root, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD").trim(),
+      "note.txt"
+    );
+    assert.equal(git(root, "status", "--porcelain"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(submoduleRoot, { recursive: true, force: true });
   }
 });
 
@@ -794,6 +1140,27 @@ test("COMMIT rejects an applied path whose retained patch content no longer matc
       "WORKSPACE_PRECONDITION_FAILED"
     );
     assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "tampered\n");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("COMMIT rejects extra changes on a retained patch target", async () => {
+  const root = repository();
+  try {
+    const { controlled, taskId } = await appliedFixture(root);
+    writeFileSync(join(root, "note.txt"), "after\nextra\n");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: commit patch",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+    assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\nextra\n");
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -981,8 +1348,13 @@ test("COMMIT recovers success when the subprocess reports failure after HEAD adv
       ["log", "-1", "--format=%s"],
       ["diff", "--cached", "--name-only", "-z"],
       ["diff", "--name-only", "-z", "--"],
+      ["rev-parse", "HEAD"],
+      ["rev-parse", "--git-dir"],
+      ["ls-files", "--stage", "-z", "--"],
       ["ls-files", "--others", "--exclude-standard", "-z", "--"],
-      ["rev-parse", "HEAD"]
+      ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+      ["rev-parse", "--git-dir"],
+      ["ls-files", "--stage", "-z", "--"]
     ]);
   } finally {
     rmSync(root, { recursive: true, force: true });
