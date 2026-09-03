@@ -1,6 +1,6 @@
 # Security design
 
-This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.4.1).
+This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.4.2).
 
 ## Enforced in code
 

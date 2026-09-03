@@ -1,6 +1,6 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.4.1). The local STDIO MCP server exposes thirteen tools.
+This is the tool surface of Engineering Bridge V1 (1.4.2). The local STDIO MCP server exposes thirteen tools.
 
 ## `run_task`
 

@@ -1,6 +1,6 @@
 # Security Policy
 
-Engineering Bridge V1 (1.4.1) is a local supervised bridge that connects an MCP client to local Codex and DSH executors. It is designed for one trusted local operator: treat the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service. It is not a hardened remote service for untrusted callers.
+Engineering Bridge V1 (1.4.2) is a local supervised bridge that connects an MCP client to local Codex and DSH executors. It is designed for one trusted local operator: treat the MCP client and the workspace configuration as trusted local inputs, and do not expose the process as a remote service. It is not a hardened remote service for untrusted callers.
 
 ## Current enforced controls
 

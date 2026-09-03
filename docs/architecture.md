@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the Engineering Bridge V1 (1.4.1) behavior.
+This document describes the Engineering Bridge V1 (1.4.2) behavior.
 
 Engineering Bridge is a local STDIO MCP server with thirteen tools and a small layered structure:
 

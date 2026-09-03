@@ -1,6 +1,6 @@
 # Threat model
 
-This threat model covers the Engineering Bridge V1 (1.4.1). Bridge assumes one trusted local operator controls startup configuration and the local MCP client. It is not designed for untrusted remote callers.
+This threat model covers the Engineering Bridge V1 (1.4.2). Bridge assumes one trusted local operator controls startup configuration and the local MCP client. It is not designed for untrusted remote callers.
 
 | Risk | Current control | Remaining responsibility or limit |
 |---|---|---|

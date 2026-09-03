@@ -1,5 +1,21 @@
 # Release notes
 
+## v1.4.2
+
+v1.4.2 is a correctness release for controlled initial commits in fresh Git repositories with no existing commit.
+
+### Fixed
+
+- Support controlled `COMMIT` for an applied proposal in a fresh/unborn Git repository, creating a root commit from exactly the proposal targets.
+- Preserve proposal-target-only staging and leave unrelated untracked recovery anchors unchanged, untracked, and unstaged.
+- Before creating the root commit, recheck the unborn state and expected branch ref so concurrent HEAD or ref creation is rejected.
+- After creating the root commit, verify that it has no parent, contains exactly the proposal paths, and leaves the index and tracked worktree clean.
+- If post-commit verification fails, report the failure without resetting, amending, or otherwise rewriting the commit that was already created.
+
+### Compatibility
+
+- Controlled `COMMIT` for repositories with a normal existing `HEAD` keeps the v1.4.1 semantics and safety boundaries unchanged.
+
 ## v1.4.1
 
 v1.4.1 is an emergency correctness release for Windows-authored workspace configuration, active Codex turn liveness, and controlled-commit recovery safety.
