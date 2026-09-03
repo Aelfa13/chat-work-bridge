@@ -247,10 +247,10 @@ export class CodexExecutor implements Executor {
       if (inactivityTimer !== undefined) startInactivityWatchdog();
     };
     const activeTurnActivity = (params: Record<string, unknown>): boolean => {
-      if (!this.startedTurnId) return false;
-      if (params.threadId !== undefined && params.threadId !== this.threadId) return false;
-      if (params.turnId !== undefined && params.turnId !== this.startedTurnId) return false;
-      return true;
+      return this.threadId !== undefined &&
+        this.startedTurnId !== undefined &&
+        params.threadId === this.threadId &&
+        params.turnId === this.startedTurnId;
     };
     this.beginInterrupt = () => {
       if (settled || terminationResult !== undefined) return;
@@ -305,6 +305,7 @@ export class CodexExecutor implements Executor {
           continue;
         }
         if (typeof message.method !== "string" || !object(message.params)) { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
+        if (activeTurnActivity(message.params)) resetInactivityWatchdog();
         if (message.method === "turn/started") {
           const turn = object(message.params.turn) ? message.params.turn : message.params;
           if (message.params.threadId === this.threadId &&
@@ -316,7 +317,6 @@ export class CodexExecutor implements Executor {
         }
         const item = object(message.params.item) ? message.params.item : undefined;
         if ((message.method === "item/started" || message.method === "item/completed") && item) {
-          if (activeTurnActivity(message.params)) resetInactivityWatchdog();
           if (item.type === "agentMessage") {
             if (message.method === "item/completed" && typeof item.text !== "string") { finish(failure("CODEX_PROTOCOL_ERROR")); return; }
             if (typeof item.text === "string") output = item.text;

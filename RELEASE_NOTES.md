@@ -1,5 +1,21 @@
 # Release notes
 
+## v1.4.1
+
+v1.4.1 is an emergency correctness release for Windows-authored workspace configuration, active Codex turn liveness, and controlled-commit recovery safety.
+
+### Fixed
+
+- Accept a workspace configuration whose first character is one UTF-8 BOM (`U+FEFF`) while preserving strict JSON parsing; a second BOM and all other malformed JSON remain rejected.
+- Reset the Codex inactivity watchdog on any app-server notification only when both `threadId` and `turnId` exactly match the active turn. Other threads, other turns, global notifications, and RPC responses cannot keep the turn alive.
+- Preserve stable unrelated untracked recovery anchors during controlled `COMMIT`, stage and commit only exact proposal targets, reject pre-existing staged or unrelated tracked dirt, and leave history advanced rather than rewriting it if post-commit recovery-anchor verification fails.
+
+### Windows operation notes
+
+- A foreground `tunnel-client run` belongs to its PowerShell process; closing that PowerShell window terminates the foreground tunnel.
+- Installing Codex Desktop does not guarantee that the `codex` CLI exists on the `PATH` inherited by the process that starts Bridge.
+- Workspace registration controls which roots MCP callers may select. It is separate from filesystem read isolation: Bridge's read-only executor settings restrict writes but do not create an OS-level read sandbox.
+
 ## v1.4.0
 
 v1.4.0 closes the supervised controlled-write loop while keeping publication outside Bridge.

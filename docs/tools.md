@@ -1,6 +1,6 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.4.0). The local STDIO MCP server exposes thirteen tools.
+This is the tool surface of Engineering Bridge V1 (1.4.1). The local STDIO MCP server exposes thirteen tools.
 
 ## `run_task`
 
@@ -32,7 +32,7 @@ The actions are state-specific:
 - `interrupt`: while `running`, interrupts the active turn. When interruption completes, the task ends as `failed`; genuine partial output may be exposed as `partial_output`.
 - `accept`: while `waiting_for_supervisor_review`, marks the reviewed output `completed` without starting another turn.
 
-Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog and short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
+Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog, reset only by an app-server notification whose `threadId` and `turnId` exactly match the active turn. Other threads, other turns, global notifications, and RPC responses do not reset it. Short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
 
 ## `bind_project`
 

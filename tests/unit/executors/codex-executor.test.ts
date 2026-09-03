@@ -466,43 +466,67 @@ test("stalls after command items complete without turn/completed", async () => {
   assert.equal(result.error.code, "EXECUTOR_STALLED");
 });
 
-test("matching item activity resets the inactivity watchdog", async () => {
+test("matching active-turn reasoning notifications reset the inactivity watchdog", async () => {
+  const inactivityTimeoutMs = 400;
   const invocations: Invocation[] = [];
   const executor = new CodexExecutor(
     TRUSTED_CWD,
     fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
     {},
     process.platform,
-    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 50 }
+    { executionTimeoutMs: 2_000, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: inactivityTimeoutMs }
   );
   const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
   await new Promise<void>((resolve) => setImmediate(resolve));
   invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
-  await new Promise<void>((resolve) => setTimeout(resolve, 30));
-  invocations[0]?.send({ method: "item/started", params: { item: { id: "cmd-1", type: "commandExecution" } } });
-  await new Promise<void>((resolve) => setTimeout(resolve, 30));
+  await new Promise<void>((resolve) => setTimeout(resolve, inactivityTimeoutMs / 2));
+  invocations[0]?.send({
+    method: "item/reasoning/summaryTextDelta",
+    params: { threadId: "thread-1", turnId: "turn-1", delta: "still reasoning" }
+  });
+  // This crosses the original deadline by 100ms but stays 100ms inside the
+  // reset deadline, so only matching active-turn activity can keep it alive.
+  await new Promise<void>((resolve) => setTimeout(resolve, inactivityTimeoutMs * 3 / 4));
   await executor.interrupt();
   assert.equal((await pending).kind, "interrupted");
 });
 
-test("mismatched activity and RPC responses do not reset the inactivity watchdog", async () => {
-  const invocations: Invocation[] = [];
-  const executor = new CodexExecutor(
-    TRUSTED_CWD,
-    fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
-    {},
-    process.platform,
-    { executionTimeoutMs: 500, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: 40 }
-  );
-  const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
-  invocations[0]?.send({ method: "item/completed", params: { threadId: "other", turnId: "turn-1", item: { type: "commandExecution" } } });
-  invocations[0]?.send({ method: "item/completed", params: { threadId: "thread-1", turnId: "other", item: { type: "commandExecution" } } });
-  invocations[0]?.send({ id: 999, result: {} });
-  const result = await settlesWithin(pending, 200);
-  assert.equal(result.kind, "failed");
-  assert.equal(result.error.code, "EXECUTOR_STALLED");
+test("other-thread, other-turn, global, and RPC traffic do not reset the inactivity watchdog", async () => {
+  const inactivityTimeoutMs = 400;
+  const trafficByCase = [
+    ["other thread", { method: "item/reasoning/summaryTextDelta", params: { threadId: "other", turnId: "turn-1", delta: "noise" } }],
+    ["other turn", { method: "item/reasoning/summaryTextDelta", params: { threadId: "thread-1", turnId: "other", delta: "noise" } }],
+    ["global notification", { method: "item/started", params: { item: { id: "cmd-1", type: "commandExecution" } } }],
+    ["RPC response", { id: 999, result: {} }]
+  ] as const;
+
+  for (const [name, traffic] of trafficByCase) {
+    const invocations: Invocation[] = [];
+    const executor = new CodexExecutor(
+      TRUSTED_CWD,
+      fakeStarter({ appServerOutput: "", autoComplete: false }, invocations),
+      {},
+      process.platform,
+      { executionTimeoutMs: 2_000, interruptGraceMs: 10, killGraceMs: 10, protocolInactivityTimeoutMs: inactivityTimeoutMs }
+    );
+    const pending = executor.execute({ taskId: TASK_ID, instruction: "inspect" });
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    invocations[0]?.send({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "turn-1" } } });
+    await new Promise<void>((resolve) => setTimeout(resolve, inactivityTimeoutMs / 2));
+    invocations[0]?.send(traffic);
+
+    try {
+      const result = await settlesWithin(pending, inactivityTimeoutMs * 3 / 4);
+      assert.equal(result.kind, "failed", name);
+      assert.equal(result.error.code, "EXECUTOR_STALLED", name);
+    } finally {
+      if (invocations[0]?.signals.length === 0) {
+        await executor.interrupt();
+        await pending;
+      }
+    }
+  }
 });
 
 test("late turn completion cannot overwrite a stall termination", async () => {

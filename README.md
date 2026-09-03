@@ -2,11 +2,11 @@
 
 **打通 Chat 与本地 Codex 与 Deepseek harness：不再搬提示词，Chat 直接调度、监督并验收 Codex 与 Deepseek harness。**
 
-[![v1.4.0](https://img.shields.io/badge/release-v1.4.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0)
+[![v1.4.1](https://img.shields.io/badge/release-v1.4.1-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.1)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[English](README.en.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · 本地运行 · macOS 由维护者持续实测。** v1.4.0 tag 与 GitHub Release 已发布，但不表示已发布到 npm。Windows 侧目前已有 GitHub Actions `windows-latest` 上的 Codex 与 DSH npm CLI 启动路径 smoke 验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
+[English](README.en.md) · **[v1.4.1](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.1) · V1 · 本地运行 · macOS 由维护者持续实测。** tag、GitHub Release 与 npm 发布仍是彼此独立的 release 操作。Windows 侧目前已有 GitHub Actions `windows-latest` 上的 Codex 与 DSH npm CLI 启动路径 smoke 验证（Node 22 + 实际 npm 安装的 `@openai/codex` 与 `@deepseek-ai/dsh`）；更广的 Windows 环境与客户端组合不做全面认证。
 
 ## 以前 / 现在
 
@@ -117,7 +117,7 @@ npm install
 npm run build
 ```
 
-当前 v1.4.0 没有一键安装器。
+当前 v1.4.1 没有一键安装器。
 
 ### 3. 登记工作区
 
@@ -281,7 +281,10 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 - **看不到十三个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node`、`codex` 或 `dsh`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这些可执行文件的路径。
+- **已经安装 Codex Desktop，但 Bridge 找不到 `codex`：** 安装桌面应用不代表 Codex CLI 一定已安装，也不代表它一定存在于启动 Bridge 的进程所继承的 `PATH`；请在同一个启动环境中验证 `codex`。
+- **Windows 上关闭 PowerShell 后 tunnel 停止：** `tunnel-client run` 是前台进程；请保持该 PowerShell 窗口开启，或显式交给进程管理器运行。
 - **工作区或路径报错：** 服务脚本与 `workspaces.json` 都应使用绝对路径，工作区 `root` 应是绝对、规范化路径，并使用已登记的 ID。
+- **工作区登记与读取隔离：** 登记只控制 MCP 调用方可选择哪些 root，并不会建立 OS 级文件读取沙箱。只读执行器设置限制写入，但同一系统用户的进程仍可读取操作系统允许的路径。
 - **受控写入被拒绝：** 检查受控写权限（manual `allow_write` 或 managed `AUTHORIZE`）、Git 顶层与干净的 tracked 工作树和 index；可运行 `git -C /absolute/path/to/my-project status --short`。
 - **手动启动后看似卡住：** 这是正常现象；Bridge 正在通过 STDIO 等待 MCP 消息。
 - **任务长时间不结束：** 执行器运行、Codex protocol inactivity 与短 RPC 都有上述 bounds；正在运行的任务也可通过 `control_task(action: "interrupt")` 显式中断。重启 Bridge 会按设计丢弃任务监督状态，受控补丁提案与 managed 工作区目录会保留。

@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the Engineering Bridge V1 (1.4.0) behavior.
+This document describes the Engineering Bridge V1 (1.4.1) behavior.
 
 Engineering Bridge is a local STDIO MCP server with thirteen tools and a small layered structure:
 
@@ -19,7 +19,7 @@ There is no HTTP server, UI, database, account system, background daemon, remote
 
 `control_task` supplies the supervisor transitions. `continue` requires a non-empty instruction while waiting for review and resumes the same Codex thread for another read-only turn (DSH: a new headless execution). `steer` requires a non-empty instruction while a turn is running and sends it to that turn (Codex only). `interrupt` is valid only while running; an interrupted turn ends in `failed`, not in a resumable review state. `accept` is valid only while waiting for review and promotes the reviewed output to `completed` as `output`.
 
-Active task supervision state (tasks, threads, evidence, review outputs) is process-local and disappears on restart. Controlled-patch proposal/application history, the managed workspace catalog, and validation profiles persist across restarts through three local sidecar files. Executor runs have a 15-minute hard deadline and bounded termination; active Codex turns also have a two-minute matching-protocol-activity watchdog and short RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task/audit history.
+Active task supervision state (tasks, threads, evidence, review outputs) is process-local and disappears on restart. Controlled-patch proposal/application history, the managed workspace catalog, and validation profiles persist across restarts through three local sidecar files. Executor runs have a 15-minute hard deadline and bounded termination; active Codex turns also have a two-minute matching-protocol-activity watchdog, reset only by notifications carrying the exact active `threadId` and `turnId`; RPC responses and global or mismatched notifications cannot reset it. Short RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task/audit history.
 
 These executor parameters restrict writes performed by Codex and DSH, but Bridge does not create OS-level filesystem read containment. A same-user executor process may read paths outside the workspace when the operating system permits it.
 
