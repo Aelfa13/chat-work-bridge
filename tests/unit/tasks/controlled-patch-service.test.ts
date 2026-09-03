@@ -18,6 +18,14 @@ function git(root: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd: root, encoding: "utf8" });
 }
 
+function currentHead(root: string): string | null {
+  try {
+    return git(root, "rev-parse", "--verify", "--quiet", "HEAD").trim();
+  } catch {
+    return null;
+  }
+}
+
 function repository(): string {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-bridge-patch-")));
   git(root, "init", "-q");
@@ -26,6 +34,14 @@ function repository(): string {
   writeFileSync(join(root, "note.txt"), "before\n");
   git(root, "add", "note.txt");
   git(root, "commit", "-qm", "base");
+  return root;
+}
+
+function unbornRepository(): string {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-bridge-root-commit-")));
+  git(root, "init", "-q");
+  git(root, "config", "user.name", "Test User");
+  git(root, "config", "user.email", "test@example.invalid");
   return root;
 }
 
@@ -122,6 +138,11 @@ index 0000000..3e75765
 +added
 `;
 
+const twoFileAdditionPatch = [
+  additionPatch.replaceAll("added.txt", "first.txt"),
+  additionPatch.replaceAll("added.txt", "second.txt")
+].join("");
+
 async function appliedFixture(
   root: string,
   patch: string = validPatch,
@@ -146,6 +167,18 @@ async function appliedFixture(
     confirmation: "APPLY"
   });
   return { ...current, taskId: generated.taskId };
+}
+
+async function appliedUnbornFixture(
+  root: string,
+  patch: string = additionPatch,
+  startProcess?: GitStarter
+): Promise<{
+  controlled: ControlledPatchService;
+  tasks: RegisteredWorkspaceTaskService;
+  taskId: string;
+}> {
+  return appliedFixture(root, patch, startProcess);
 }
 
 function mutateBeforeCommit(mutate: () => void): GitStarter {
@@ -605,6 +638,268 @@ test("stores and applies a controlled patch normalized to one trailing LF", asyn
   });
   await controlled.apply({ patch_task_id: generated.taskId, confirmation: "APPLY" });
   assert.equal(readFileSync(join(root, "note.txt"), "utf8"), "after\n");
+});
+
+test("initial COMMIT creates a verified root commit from exactly the applied proposal targets", async () => {
+  const root = unbornRepository();
+  const anchorPath = "recovery-anchor.md";
+  try {
+    writeFileSync(join(root, anchorPath), "keep me\n");
+    const { controlled, taskId } = await appliedUnbornFixture(root, twoFileAdditionPatch);
+
+    const result = await controlled.commit({
+      patch_task_id: taskId,
+      message: "  feat: initial controlled commit  ",
+      confirmation: "COMMIT"
+    });
+
+    assert.equal(result.patch_task_id, taskId);
+    assert.equal(result.committed, true);
+    assert.match(result.commit_sha, /^[0-9a-f]{40,64}$/u);
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), result.commit_sha);
+    assert.deepEqual(
+      git(root, "rev-list", "--parents", "-n", "1", "HEAD").trim().split(/\s+/u),
+      [result.commit_sha]
+    );
+    assert.equal(git(root, "log", "-1", "--format=%s").trim(), "feat: initial controlled commit");
+    assert.deepEqual(
+      git(root, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD")
+        .trim()
+        .split("\n")
+        .sort(),
+      ["first.txt", "second.txt"]
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(git(root, "diff", "--name-only"), "");
+    assert.equal(readFileSync(join(root, anchorPath), "utf8"), "keep me\n");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), anchorPath);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT rejects a dirty index without disturbing its staged entry", async () => {
+  const root = unbornRepository();
+  try {
+    const { controlled, taskId } = await appliedUnbornFixture(root);
+    writeFileSync(join(root, "staged-by-user.txt"), "user staged\n");
+    git(root, "add", "staged-by-user.txt");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(git(root, "diff", "--cached", "--name-only").trim(), "staged-by-user.txt");
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(currentHead(root), null);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT rejects an applied unborn proposal after another process establishes HEAD", async () => {
+  const root = unbornRepository();
+  try {
+    const { controlled, taskId } = await appliedUnbornFixture(root);
+    git(root, "commit", "--allow-empty", "-qm", "concurrent initial commit");
+    const concurrentHead = git(root, "rev-parse", "HEAD").trim();
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(git(root, "rev-parse", "HEAD").trim(), concurrentHead);
+    assert.deepEqual(git(root, "rev-list", "--parents", "-n", "1", "HEAD").trim().split(/\s+/u), [concurrentHead]);
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), "added.txt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT rejects an inserted ref before staging any proposal target", async () => {
+  const root = unbornRepository();
+  let cachedStagingCalls = 0;
+  const starter: GitStarter = (executable, args, options) => {
+    if (executable === "git" && args[0] === "apply" && args.includes("--cached")) {
+      cachedStagingCalls += 1;
+    }
+    return spawn(executable, args, options);
+  };
+  try {
+    const { controlled, taskId } = await appliedUnbornFixture(root, additionPatch, starter);
+    const emptyTree = execFileSync("git", ["mktree"], { cwd: root, encoding: "utf8", input: "" }).trim();
+    const concurrentCommit = git(root, "commit-tree", emptyTree, "-m", "concurrent detached commit").trim();
+    git(root, "update-ref", "refs/tags/concurrent", concurrentCommit);
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(cachedStagingCalls, 0);
+    assert.equal(currentHead(root), null);
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), "added.txt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT rechecks for inserted refs immediately before creating the root commit", async () => {
+  const root = unbornRepository();
+  let insertedRef = false;
+  try {
+    const emptyTree = execFileSync("git", ["mktree"], { cwd: root, encoding: "utf8", input: "" }).trim();
+    const concurrentCommit = git(root, "commit-tree", emptyTree, "-m", "concurrent detached commit").trim();
+    const starter: GitStarter = (executable, args, options) => {
+      if (executable === "git" && args[0] === "apply" && args.includes("--cached")) {
+        insertedRef = true;
+        return spawn(process.execPath, [
+          "-e",
+          "let input='';process.stdin.setEncoding('utf8');process.stdin.on('data',c=>input+=c);process.stdin.on('end',()=>{const cp=require('node:child_process');const [git,argsJson,commit]=process.argv.slice(1);const applied=cp.spawnSync(git,JSON.parse(argsJson),{cwd:process.cwd(),input,encoding:'utf8',shell:false});if(applied.stdout)process.stdout.write(applied.stdout);if(applied.stderr)process.stderr.write(applied.stderr);if(applied.status!==0)process.exit(applied.status??1);const updated=cp.spawnSync(git,['update-ref','refs/tags/concurrent',commit],{cwd:process.cwd(),stdio:'inherit',shell:false});process.exit(updated.status??1);});",
+          executable,
+          JSON.stringify(args),
+          concurrentCommit
+        ], options);
+      }
+      return spawn(executable, args, options);
+    };
+    const { controlled, taskId } = await appliedUnbornFixture(root, additionPatch, starter);
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(insertedRef, true);
+    assert.equal(git(root, "show-ref", "--verify", "refs/tags/concurrent").trim().split(" ")[0], concurrentCommit);
+    assert.equal(currentHead(root), null);
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(git(root, "ls-files", "--others", "--exclude-standard").trim(), "added.txt");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT failure cleans up only Bridge-staged proposal targets", async () => {
+  const root = unbornRepository();
+  const anchorPath = "recovery-anchor.md";
+  let commitCalls = 0;
+  const starter: GitStarter = (executable, args, options) => {
+    if (executable === "git" && args.includes("commit")) {
+      commitCalls += 1;
+      return spawn(process.execPath, ["-e", "process.exit(1)"], options);
+    }
+    return spawn(executable, args, options);
+  };
+  try {
+    writeFileSync(join(root, anchorPath), "keep me\n");
+    const { controlled, taskId } = await appliedUnbornFixture(root, additionPatch, starter);
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(commitCalls, 1);
+    assert.equal(currentHead(root), null);
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(readFileSync(join(root, "added.txt"), "utf8"), "added\n");
+    assert.equal(readFileSync(join(root, anchorPath), "utf8"), "keep me\n");
+    assert.deepEqual(
+      git(root, "ls-files", "--others", "--exclude-standard").trim().split("\n").sort(),
+      ["added.txt", anchorPath]
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("initial COMMIT preserves a created root commit when exact-path post-verification fails", async () => {
+  const root = unbornRepository();
+  const anchorPath = "recovery-anchor.md";
+  try {
+    writeFileSync(join(root, anchorPath), "keep me\n");
+    const { controlled, taskId } = await appliedUnbornFixture(
+      root,
+      additionPatch,
+      mutateBeforeCommit(() => git(root, "add", anchorPath))
+    );
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: initial controlled commit",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    const committedHead = currentHead(root);
+    assert.ok(committedHead !== null);
+    assert.match(committedHead, /^[0-9a-f]{40,64}$/u);
+    assert.deepEqual(
+      git(root, "rev-list", "--parents", "-n", "1", "HEAD").trim().split(/\s+/u),
+      [committedHead]
+    );
+    assert.deepEqual(
+      git(root, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "HEAD")
+        .trim()
+        .split("\n")
+        .sort(),
+      ["added.txt", anchorPath]
+    );
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "");
+    assert.equal(git(root, "diff", "--name-only"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a commit-based proposal cannot be downgraded into the root-commit branch", async () => {
+  const root = repository();
+  try {
+    const { controlled, taskId } = await appliedFixture(root);
+    git(root, "update-ref", "-d", "refs/heads/main");
+
+    await expectCode(
+      () => controlled.commit({
+        patch_task_id: taskId,
+        message: "feat: must remain commit based",
+        confirmation: "COMMIT"
+      }),
+      "WORKSPACE_PRECONDITION_FAILED"
+    );
+
+    assert.equal(currentHead(root), null);
+    assert.equal(git(root, "log", "--all", "--oneline"), "");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("COMMIT requires exact confirmation and an applied proposal", async () => {

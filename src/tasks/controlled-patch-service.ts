@@ -331,8 +331,7 @@ export class ControlledPatchService {
       if (proposal.state !== "applied") {
         throw new CoreError("INVALID_STATE_TRANSITION");
       }
-      if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot ||
-          proposal.base.kind !== "commit") {
+      if (this.registry.resolveWritable(proposal.workspaceId) !== proposal.workspaceRoot) {
         throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       }
       return this.commitAppliedProposal(taskId, proposal, patch, message);
@@ -362,9 +361,12 @@ export class ControlledPatchService {
     await this.verifyWorkspaceRoot(proposal.workspaceRoot);
     const base = proposal.base;
     const currentBase = await this.detectBase(proposal.workspaceRoot);
-    if (base.kind !== "commit" || !sameBase(currentBase, base)) {
+    if (!sameBase(currentBase, base)) {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     }
+    const unbornHeadRef = base.kind === "unborn"
+      ? await this.verifyUnbornWithoutRefs(proposal.workspaceRoot)
+      : undefined;
 
     const stagedBefore = splitNul(await this.git(proposal.workspaceRoot, [
       "diff",
@@ -446,12 +448,23 @@ export class ControlledPatchService {
       if (unstagedAfter.length !== 0) {
         throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
       }
+      if (base.kind === "unborn" &&
+          await this.verifyUnbornWithoutRefs(proposal.workspaceRoot) !== unbornHeadRef) {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
     } catch (error) {
-      await this.unstageCommittedPathsIfHeadRemainsBase(
-        proposal.workspaceRoot,
-        base.head,
-        targets
-      );
+      if (base.kind === "commit") {
+        await this.unstageCommittedPathsIfHeadRemainsBase(
+          proposal.workspaceRoot,
+          base.head,
+          targets
+        );
+      } else {
+        await this.unstageInitialCommitPathsIfHeadRemainsUnborn(
+          proposal.workspaceRoot,
+          targets
+        );
+      }
       throw error;
     }
 
@@ -471,14 +484,33 @@ export class ControlledPatchService {
       commitError = error;
     }
 
-    const commitSha = (await this.git(proposal.workspaceRoot, [
-      "rev-parse",
-      "HEAD"
-    ])).trim();
-    if (commitSha === base.head) {
-      await this.unstageCommittedPaths(proposal.workspaceRoot, targets);
-      if (commitError !== undefined) throw commitError;
-      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    let commitSha: string;
+    if (base.kind === "commit") {
+      commitSha = (await this.git(proposal.workspaceRoot, [
+        "rev-parse",
+        "HEAD"
+      ])).trim();
+      if (commitSha === base.head) {
+        await this.unstageCommittedPaths(proposal.workspaceRoot, targets);
+        if (commitError !== undefined) throw commitError;
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
+    } else {
+      const head = await this.gitResult(proposal.workspaceRoot, [
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "HEAD"
+      ]);
+      if (head.code !== 0) {
+        await this.unstageInitialCommitPathsIfHeadRemainsUnborn(
+          proposal.workspaceRoot,
+          targets
+        );
+        if (commitError !== undefined) throw commitError;
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
+      commitSha = head.stdout.trim();
     }
 
     const ancestry = (await this.git(proposal.workspaceRoot, [
@@ -488,13 +520,16 @@ export class ControlledPatchService {
       "1",
       "HEAD"
     ])).trim().split(/\s+/u);
-    if (!/^[0-9a-f]{40,64}$/u.test(commitSha) ||
-        ancestry.length !== 2 || ancestry[0] !== commitSha || ancestry[1] !== base.head) {
+    const validAncestry = base.kind === "commit"
+      ? ancestry.length === 2 && ancestry[0] === commitSha && ancestry[1] === base.head
+      : ancestry.length === 1 && ancestry[0] === commitSha;
+    if (!/^[0-9a-f]{40,64}$/u.test(commitSha) || !validAncestry) {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
     }
 
     const committedPaths = splitNul(await this.git(proposal.workspaceRoot, [
       "diff-tree",
+      ...(base.kind === "unborn" ? ["--root"] : []),
       "--no-commit-id",
       "--name-only",
       "-r",
@@ -526,6 +561,20 @@ export class ControlledPatchService {
     if (stagedFinal.length !== 0 || trackedFinal.length !== 0 ||
         finalHead !== commitSha) {
       throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    if (base.kind === "unborn") {
+      const refs = splitLines(await this.git(proposal.workspaceRoot, [
+        "for-each-ref",
+        "--format=%(refname)"
+      ])).sort();
+      const committedRef = (await this.git(proposal.workspaceRoot, [
+        "rev-parse",
+        "--verify",
+        unbornHeadRef!
+      ])).trim();
+      if (!sameStrings(refs, [unbornHeadRef!]) || committedRef !== commitSha) {
+        throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+      }
     }
     await this.verifyUntrackedSnapshot(
       proposal.workspaceRoot,
@@ -642,6 +691,38 @@ export class ControlledPatchService {
 
   private async unstageCommittedPaths(workspaceRoot: string, paths: readonly string[]): Promise<void> {
     await this.git(workspaceRoot, ["reset", "-q", "HEAD", "--", ...paths]);
+  }
+
+  private async unstageInitialCommitPathsIfHeadRemainsUnborn(
+    workspaceRoot: string,
+    paths: readonly string[]
+  ): Promise<void> {
+    const currentBase = await this.detectBase(workspaceRoot);
+    if (currentBase.kind === "unborn") {
+      await this.git(workspaceRoot, [
+        "rm",
+        "--cached",
+        "-q",
+        "--ignore-unmatch",
+        "--",
+        ...paths
+      ]);
+    }
+  }
+
+  private async verifyUnbornWithoutRefs(workspaceRoot: string): Promise<string> {
+    if ((await this.detectBase(workspaceRoot)).kind !== "unborn") {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    const headRef = (await this.git(workspaceRoot, ["symbolic-ref", "--quiet", "HEAD"])).trim();
+    const refs = splitLines(await this.git(workspaceRoot, [
+      "for-each-ref",
+      "--format=%(refname)"
+    ]));
+    if (!/^refs\/heads\/[^\s]+$/u.test(headRef) || refs.length !== 0) {
+      throw new CoreError("WORKSPACE_PRECONDITION_FAILED");
+    }
+    return headRef;
   }
 
   private async applyCheck(workspaceRoot: string, patch: string, reverse: boolean): Promise<boolean> {
@@ -1047,6 +1128,11 @@ function splitNul(value: string): string[] {
   if (parts[parts.length - 1] === "") parts.pop();
   if (parts.some((part) => part.length === 0)) failPatch();
   return parts;
+}
+
+function splitLines(value: string): string[] {
+  if (value.length === 0) return [];
+  return value.trimEnd().split("\n");
 }
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
