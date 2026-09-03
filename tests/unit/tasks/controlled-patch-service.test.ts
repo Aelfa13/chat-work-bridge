@@ -884,7 +884,8 @@ test("a commit-based proposal cannot be downgraded into the root-commit branch",
   const root = repository();
   try {
     const { controlled, taskId } = await appliedFixture(root);
-    git(root, "update-ref", "-d", "refs/heads/main");
+    const headRef = git(root, "symbolic-ref", "--quiet", "HEAD").trim();
+    git(root, "update-ref", "-d", headRef);
 
     await expectCode(
       () => controlled.commit({
