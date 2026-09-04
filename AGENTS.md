@@ -23,13 +23,15 @@ For production work also read:
 - GitHub CI/release exists in `.github/` and `RELEASE_NOTES.md`
 - `main` is the pure upstream-sync baseline.
 - `dev` contains governance and personal integration work.
-- `feature/windows-chatgpt-desktop` is the planned Windows adaptation branch; it is not created yet.
+- `feature/windows-chatgpt-desktop` is the created/current Windows adaptation branch.
 - Default branch: main
 - Development branch: dev
 - Production-history branch: N/A
 - origin: personal fork (`git@github.com:Aelfa13/chat-work-bridge.git`)
 - upstream: source upstream (`git@github.com:wudy29/engineering-bridge.git`)
-- Windows port baseline: supplemental, 331 total / 244 pass / 86 known platform failures / 1 skip / 0 unexplained failures.
+- Upstream baseline: `main == upstream/main == ddabd9486c6a997fc73326267487c31ee4788095` (`v1.4.2-1-gddabd94`, package version `1.4.2`).
+- Windows port baseline: supplemental, 352 total / 251 pass / 98 known platform failures / 3 skips / 0 unexplained failures.
+- Windows known failure classes: `WINDOWS_SPECIFIC_PATH_SEMANTICS=58`, `ENVIRONMENT_EOL_CONFIGURATION=37`, `PERMISSION_MODEL_SYMLINK=3`.
 - Windows baseline status: `ACCEPTED_WITH_KNOWN_PLATFORM_FAILURES`; upstream regression is `NOT_PROVEN`.
 - Authoritative upstream CI: `ubuntu-latest`, Node.js 22, `npm test`; Windows is not in the upstream CI matrix.
 - Production direct edit: forbidden for daily development
@@ -39,7 +41,7 @@ For production work also read:
 
 - Development is the default workspace.
 - Validation is a development-test boundary, uses separate data/config/dependencies, is not a production copy, and follows manual start → test → manual stop.
-- The Windows full-test result is a supplemental known baseline, not a requirement for 331/331 PASS before feature work.
+- The Windows full-test result is a supplemental known baseline, not a requirement for 352/352 PASS before feature work.
 - Windows port work must not add unexplained failures, must not increase known failures without an explanation, must add targeted Windows validation, and should reduce known failures over time.
 - There is currently no real production runtime; production host/service/database/deployment path are not configured here.
 - A recovery mirror is not configured.

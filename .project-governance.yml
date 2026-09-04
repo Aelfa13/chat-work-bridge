@@ -18,7 +18,7 @@ branches:
   release_pattern: "release/*"
   hotfix_pattern: "hotfix/*"
   planned_feature_branch: "feature/windows-chatgpt-desktop"
-  planned_feature_status: "PLANNED"
+  planned_feature_status: "CREATED"
 remote:
   origin:
     url: "git@github.com:Aelfa13/chat-work-bridge.git"
@@ -50,22 +50,38 @@ environments:
     windows_known_baseline_gate:
       status: "PASS"
       baseline_status: "ACCEPTED_WITH_KNOWN_PLATFORM_FAILURES"
-      total: 331
-      pass: 244
-      known_fail: 86
-      skip: 1
+      target_platform: "Windows"
+      upstream_baseline_sha: "ddabd9486c6a997fc73326267487c31ee4788095"
+      upstream_version: "1.4.2"
+      total: 352
+      pass: 251
+      known_fail: 98
+      skip: 3
       unexplained_failures: 0
-      upstream_regression: "NOT_PROVEN"
+      upstream_regression_status: "NOT_PROVEN"
+      target_platform_baseline_status: "ACCEPTED_WITH_KNOWN_PLATFORM_FAILURES"
       failure_classes:
         WINDOWS_SPECIFIC_PATH_SEMANTICS:
           count: 58
-          classification: "WINDOWS_SPECIFIC"
+          classification: "WINDOWS_PLATFORM"
+          representative_tests:
+            - "POSIX: a Windows-style codex.exe layout on PATH does not change the bare spawn"
+            - "returns immediately and exposes queued/running without a result"
+          mechanism: "Windows path.isAbsolute and executable/workspace path semantics differ from POSIX fixtures."
         ENVIRONMENT_EOL_CONFIGURATION:
-          count: 26
+          count: 37
           classification: "ENVIRONMENT"
+          representative_tests:
+            - "submit_controlled_patch registers a submitted proposal and task_result reports source submitted without an executor"
+            - "applies a refined proposal after restart without rerunning generation"
+          mechanism: "Windows working-tree EOL produces CRLF while these fixtures assert LF."
         PERMISSION_MODEL_SYMLINK:
-          count: 2
+          count: 3
           classification: "PERMISSION_MODEL"
+          representative_tests:
+            - "accepts a symlink alias that resolves to the same Git top-level"
+            - "bind rejects paths outside approved roots, prefix siblings, and symlink escapes"
+          mechanism: "Windows symlinkSync is denied with EPERM under the current permission model."
     windows_port_regression_gate:
       status: "MANUAL"
       no_new_unexplained_failures: true
