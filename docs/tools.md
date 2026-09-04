@@ -1,6 +1,6 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.4.0). The local STDIO MCP server exposes thirteen tools.
+This is the tool surface of Engineering Bridge V1 (1.4.2). The local STDIO MCP server exposes thirteen tools.
 
 ## `run_task`
 
@@ -32,7 +32,7 @@ The actions are state-specific:
 - `interrupt`: while `running`, interrupts the active turn. When interruption completes, the task ends as `failed`; genuine partial output may be exposed as `partial_output`.
 - `accept`: while `waiting_for_supervisor_review`, marks the reviewed output `completed` without starting another turn.
 
-Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog and short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
+Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog, reset only by an app-server notification whose `threadId` and `turnId` exactly match the active turn. Other threads, other turns, global notifications, and RPC responses do not reset it. Short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
 
 ## `bind_project`
 
@@ -80,7 +80,7 @@ The controlled file-application checkpoint. Confirmation must equal `APPLY` exac
 
 Inputs: `patch_task_id`, `message`, `confirmation` (must equal `COMMIT` exactly).
 
-Creates one Git commit containing only an already-`APPLY`ed controlled patch. The patch task must identify a retained controlled proposal that has already been applied; `message` must be non-empty and the confirmation is exact and case-sensitive. The commit step is separate from `APPLY`, does not imply any later gate, and never pushes.
+Creates one Git commit containing only an already-`APPLY`ed controlled patch. The patch task must identify a retained controlled proposal that has already been applied; `message` must be non-empty and the confirmation is exact and case-sensitive. The index must start clean, unrelated tracked or staged changes are rejected, and retained patch content is staged exactly. Pre-existing unignored untracked files outside the patch targets are allowed only when Bridge can safely fingerprint them under the workspace lock and match their complete path set and contents at later discrete verification checkpoints; new, removed, modified, replaced, or unsupported special paths fail closed. Existing tracked gitlink worktrees are scan boundaries, so Bridge does not recurse into them with superproject ignore rules. This checking is not continuous monitoring or a filesystem transaction. If Git creates the commit but final recovery-anchor verification fails, the call returns `WORKSPACE_PRECONDITION_FAILED` with HEAD already advanced; Bridge does not reset or rewrite history, and retrying the same proposal fails its original-base-HEAD check without another commit. Patch-added untracked targets remain controlled patch paths, while ignored paths retain their existing semantics and stay outside this snapshot. The commit step is separate from `APPLY`, does not imply any later gate, and never pushes.
 
 ## `configure_validation_profile`
 

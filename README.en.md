@@ -2,11 +2,11 @@
 
 **Connect Chat directly to local Codex or DSH: no more shuttling prompts and results—Chat dispatches, supervises, and accepts the executor's work.**
 
-[![v1.4.0](https://img.shields.io/badge/release-v1.4.0-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0)
+[![v1.4.2](https://img.shields.io/badge/release-v1.4.2-blue)](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.2)
 [![CI](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wudy29/engineering-bridge/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-[简体中文](README.md) · **[v1.4.0](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.0) · V1 · Local · Continuously maintainer-tested on macOS.** The v1.4.0 tag and GitHub Release have been published; this does not indicate npm publication. Windows currently has smoke verification of the Codex and DSH npm CLI launch path on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
+[简体中文](README.md) · **[v1.4.2](https://github.com/wudy29/engineering-bridge/releases/tag/v1.4.2) · V1 · Local · Continuously maintainer-tested on macOS.** Tag, GitHub Release, and npm publication remain separate release actions. Windows currently has smoke verification of the Codex and DSH npm CLI launch path on GitHub Actions `windows-latest` (Node 22 with actual npm-installed `@openai/codex` and `@deepseek-ai/dsh`); broader Windows environments and client combinations are not claimed fully certified.
 
 ## Before / now
 
@@ -116,7 +116,7 @@ npm install
 npm run build
 ```
 
-The current v1.4.0 release has no one-click installer.
+The current v1.4.2 release has no one-click installer.
 
 ### 3. Register a workspace
 
@@ -234,7 +234,7 @@ The process waits for MCP messages on standard input. It is not an interactive s
 - Bridge rejects delete, rename, copy, binary, mode-change, executable, symlink, submodule, unsafe-path, and other unsupported patches, including additions whose targets already exist.
 - Bridge never automatically tests, stages, commits, pushes, or creates a Release.
 - The Codex backend is `codex app-server --stdio`, with no shell, approval `never`, and network disabled; DSH runs through the official headless interface with a per-process `DSH_PERMISSION_MODE=read-only` pin, an explicit environment allowlist (including `DEEPSEEK_API_KEY` and `DSH_TOOLS_MODE`), and proxy variables excluded. Ordinary/supervisor tasks and proposal generation remain read-only; only exact reviewed `APPLY` is a filesystem write path.
-- Task supervision state (task/thread/evidence/review) is process-local; controlled-patch proposals/applied history and the managed workspace catalog survive restarts (two local state files, mode 0600). Each executor run has a 15-minute hard deadline; an active Codex turn fails with `EXECUTOR_STALLED` after two minutes without matching protocol activity, and short Codex RPC calls have a separate 30-second bound. A running task can also be explicitly interrupted through `control_task(action: "interrupt")`; genuine partial output from an interactive interruption is returned as `partial_output`, while ordinary failures never re-expose stderr or partial stdout.
+- Task supervision state (task/thread/evidence/review) is process-local; controlled-patch proposals/applied history, the managed workspace catalog, and validation profiles survive restarts (three local state files, mode 0600). Each executor run has a 15-minute hard deadline; an active Codex turn fails with `EXECUTOR_STALLED` after two minutes without a notification whose `threadId` and `turnId` exactly match that turn, and short Codex RPC calls have a separate 30-second bound. A running task can also be explicitly interrupted through `control_task(action: "interrupt")`; genuine partial output from an interactive interruption is returned as `partial_output`, while ordinary failures never re-expose stderr or partial stdout.
 - Workspaces are registered in two ways: manually in `workspaces.json` (authoritative) or through managed onboarding inside `project_root` with exact `BIND`/`CREATE`; calls still require `workspace_id`.
 - Codex evidence truncated/evicted by its existing bounds carries explicit markers (`[truncated]`, changes-omitted counts, evidence-drop)—they mean the diagnostic information is incomplete, not that it is a complete transcript.
 - Read-only execution is not OS-level filesystem isolation. A same-user process may read other files the operating system permits.
@@ -246,7 +246,10 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 
 - **The thirteen tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
 - **The client cannot find `node`, `codex`, or `dsh`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing these executables.
+- **Codex Desktop is installed but Bridge cannot find `codex`:** the desktop app does not guarantee that the Codex CLI is installed or present on the `PATH` inherited by the process that launches Bridge. Verify `codex` from that same launch environment.
+- **A Windows tunnel stops when PowerShell closes:** `tunnel-client run` is a foreground process. Keep its PowerShell window open or run it under an explicitly configured process manager.
 - **Workspace or path error:** use absolute paths for the server script and `workspaces.json`, an absolute normalized workspace `root`, and an existing registered ID.
+- **Workspace registration versus read isolation:** registration controls which roots MCP callers may select; it does not create an OS-level filesystem read sandbox. Read-only executor settings restrict writes, while same-user processes may still read paths the operating system permits.
 - **Controlled write refused:** check the controlled-write permission (manual `allow_write` or managed `AUTHORIZE`), the Git top-level, and a clean tracked worktree and index with `git -C /absolute/path/to/my-project status --short`.
 - **Manual start appears stuck:** this is expected; Bridge is waiting for MCP messages over STDIO.
 - **A task runs for a long time:** executor runs, Codex protocol inactivity, and short RPC calls have the bounds above; a running task can also be explicitly interrupted through `control_task(action: "interrupt")`. Restarting Bridge discards task supervision state by design; controlled-patch proposals and the managed workspace catalog are retained.

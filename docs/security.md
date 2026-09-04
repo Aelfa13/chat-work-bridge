@@ -1,6 +1,6 @@
 # Security design
 
-This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.3.0).
+This document separates enforced behavior from operating assumptions for the Engineering Bridge V1 (1.4.2).
 
 ## Enforced in code
 
@@ -11,11 +11,12 @@ This document separates enforced behavior from operating assumptions for the Eng
 - Codex evidence stays within its existing bounds (string length, changes count, total entry count); truncation and eviction are made visible through explicit markers rather than silently dropped. Markers indicate incomplete diagnostic information, not a complete transcript.
 - Write access defaults to disabled. Manual workspaces enable it through `allow_write: true` in `workspaces.json`; managed workspaces grant it only through `authorize_workspace_write` with exact `AUTHORIZE`, which never modifies a manual registration.
 - Controlled patch generation, refinement, and submission are read-only and require no write authorization; they verify a clean Git top-level (existing HEAD or unborn-base support) and record or require the exact base HEAD. Submission performs the shared preflight without running an executor. Files are not modified during generation, refinement, or submission.
-- Executor runs have a 15-minute hard deadline with bounded process-tree termination; active Codex turns also have a two-minute matching-protocol-activity watchdog and short Codex RPC calls have a separate 30-second bound. Controlled-patch and onboarding Git subprocesses have a 60-second bound.
+- Executor runs have a 15-minute hard deadline with bounded process-tree termination; active Codex turns also have a two-minute watchdog reset only by notifications carrying the exact active `threadId` and `turnId`; RPC responses and global or mismatched notifications cannot reset it. Short Codex RPC calls have a separate 30-second bound. Controlled-patch and onboarding Git subprocesses have a 60-second bound.
 - Application requires exact, case-sensitive `APPLY`, a completed one-use proposal, controlled-write permission, and rechecks the canonical Git root, HEAD, and clean tracked worktree/index before validating the patch.
 - Patch validation accepts modifications to existing tracked regular files and exact 100644 ordinary text-file additions whose target is absent from base HEAD, the index, and the worktree; unborn bases support additions only.
 - Deletions, rename/copy, binary patches, mode changes, executable additions, symlinks, submodules, unsafe paths, duplicate paths, and malformed or inconsistent headers are rejected.
 - Bridge invokes only fixed `git apply --check` and `git apply` operations for application. It never automatically tests, stages, commits, or pushes.
+- A separate exact `COMMIT` gate stages only the retained patch content and creates one commit without pushing. It rejects staged or unrelated tracked dirt, preserves stable unrelated untracked recovery anchors without staging them, and never resets or rewrites history after a post-commit verification failure.
 - Returned executor failures use fixed safe messages rather than forwarding stderr.
 
 ## Workspace trust
@@ -26,10 +27,11 @@ The human reviewer must inspect every path and hunk in a proposal before supplyi
 
 ## Persistence boundary
 
-Two local state files provide restart persistence, both written atomically (write-temporary-then-rename) with mode 0600:
+Three local state files provide restart persistence, all written atomically (write-temporary-then-rename) with mode 0600:
 
 - `<config>.managed-workspaces.json` — the managed workspace catalog (registrations and controlled-write authorization). Individually invalid records are skipped on load; persist failures roll back the in-memory change.
 - `<config>.controlled-patches.json` — controlled-patch proposals and applied history. Invalid retained records are quarantined without blocking startup; duplicate identity, applied-history contradictions, and other global invariants still fail closed.
+- `<config>.validation-profiles.json` — fixed per-workspace validation profiles configured through exact `CONFIGURE`.
 
 These files are not a credential store and not a complete audit log. Active task supervision state (tasks, threads, evidence, review outputs) remains process-local and disappears on restart.
 

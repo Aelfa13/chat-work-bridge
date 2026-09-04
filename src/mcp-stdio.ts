@@ -100,7 +100,8 @@ async function main(): Promise<void> {
 
   const configPath = process.argv[2];
   if (configPath === undefined) throw new Error("Workspace configuration path is required.");
-  const parsed = WorkspaceConfigSchema.parse(JSON.parse(await readFile(configPath, "utf8")));
+  const configSource = await readFile(configPath, "utf8");
+  const parsed = WorkspaceConfigSchema.parse(JSON.parse(configSource.startsWith("\uFEFF") ? configSource.slice(1) : configSource));
   const workspaceEntries = parsed.filter((entry): entry is WorkspaceEntry => !isProjectRootEntry(entry));
   const projectRootEntries = parsed.filter(isProjectRootEntry);
   for (const entry of projectRootEntries) {

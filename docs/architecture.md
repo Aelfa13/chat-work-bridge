@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the Engineering Bridge V1 (1.4.0) behavior.
+This document describes the Engineering Bridge V1 (1.4.2) behavior.
 
 Engineering Bridge is a local STDIO MCP server with thirteen tools and a small layered structure:
 
@@ -19,7 +19,7 @@ There is no HTTP server, UI, database, account system, background daemon, remote
 
 `control_task` supplies the supervisor transitions. `continue` requires a non-empty instruction while waiting for review and resumes the same Codex thread for another read-only turn (DSH: a new headless execution). `steer` requires a non-empty instruction while a turn is running and sends it to that turn (Codex only). `interrupt` is valid only while running; an interrupted turn ends in `failed`, not in a resumable review state. `accept` is valid only while waiting for review and promotes the reviewed output to `completed` as `output`.
 
-Active task supervision state (tasks, threads, evidence, review outputs) is process-local and disappears on restart. Controlled-patch proposal/application history, the managed workspace catalog, and validation profiles persist across restarts through three local sidecar files. Executor runs have a 15-minute hard deadline and bounded termination; active Codex turns also have a two-minute matching-protocol-activity watchdog and short RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task/audit history.
+Active task supervision state (tasks, threads, evidence, review outputs) is process-local and disappears on restart. Controlled-patch proposal/application history, the managed workspace catalog, and validation profiles persist across restarts through three local sidecar files. Executor runs have a 15-minute hard deadline and bounded termination; active Codex turns also have a two-minute matching-protocol-activity watchdog, reset only by notifications carrying the exact active `threadId` and `turnId`; RPC responses and global or mismatched notifications cannot reset it. Short RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task/audit history.
 
 These executor parameters restrict writes performed by Codex and DSH, but Bridge does not create OS-level filesystem read containment. A same-user executor process may read paths outside the workspace when the operating system permits it.
 
@@ -31,6 +31,6 @@ Controlled writes are a separate path. `generate_controlled_patch`, `refine_cont
 
 Optional proposal validation is a separate read-only gate. `configure_validation_profile` installs one fixed argv-only profile per workspace after exact `CONFIGURE`; `validate_controlled_patch` applies the candidate in a temporary detached worktree and returns `PASS`, `FAIL`, or `INCOMPLETE`. Validation does not authorize `APPLY` or change proposal state, and the temporary worktree is isolation for the registered workspace rather than a host-level sandbox.
 
-`commit_controlled_patch` is the separate Git-history checkpoint. It requires an already-`APPLY`ed retained proposal, a non-empty commit message, and exact case-sensitive `COMMIT`, then creates one Git commit containing only that controlled patch. It never pushes, and no gate implies push or Release creation.
+`commit_controlled_patch` is the separate Git-history checkpoint. It requires an already-`APPLY`ed retained proposal, a non-empty commit message, and exact case-sensitive `COMMIT`, then creates one Git commit containing only the exact retained patch. Under the existing per-workspace lock it distinguishes tracked targets, patch-added untracked targets, and pre-existing unrelated unignored untracked files. Unrelated tracked/staged dirt is rejected; unrelated untracked files are allowed only through a stable file-level path and content fingerprint compared at discrete verification checkpoints. Existing tracked gitlink worktrees are scan boundaries rather than directories interpreted with superproject ignore rules. Ignored paths remain outside the snapshot, unsafe special files fail closed, and no unrelated path is staged. This is neither continuous filesystem monitoring nor a transactional history rollback: if Git creates the commit but final recovery-anchor verification fails, the call returns `WORKSPACE_PRECONDITION_FAILED` while HEAD remains advanced, and Bridge does not reset or rewrite the commit. It never pushes, and no gate implies push or Release creation.
 
 The generation prompt asks the executor for a narrow valid diff, but prompt compliance is not a security boundary. Patch validation is code-enforced; whether the proposed semantic change is desirable remains a human review decision.

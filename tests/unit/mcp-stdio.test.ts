@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -13,6 +13,42 @@ const VERSION_MODULE = new URL("../../src/version.js", import.meta.url);
 interface ToolResult {
   content: Array<{ type?: string; text?: string } | undefined>;
 }
+
+test("workspace configuration strips exactly one leading UTF-8 BOM", async () => {
+  const cases = [
+    { source: "\uFEFF[]\n", accepted: true },
+    { source: "\uFEFF\uFEFF[]\n", accepted: false }
+  ] as const;
+
+  for (const { source, accepted } of cases) {
+    const configRoot = mkdtempSync(join(tmpdir(), "engineering-bridge-bom-"));
+    const configPath = join(configRoot, "workspaces.json");
+    writeFileSync(configPath, source);
+    const client = new Client({ name: "test-client", version: "1.0.0" });
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [join(process.cwd(), "dist/src/mcp-stdio.js"), configPath],
+      cwd: process.cwd(),
+      stderr: "pipe"
+    });
+
+    try {
+      if (!accepted) {
+        await assert.rejects(client.connect(transport));
+        continue;
+      }
+      await client.connect(transport);
+      const listed = await client.listTools();
+      assert.equal(listed.tools.some(({ name }) => name === "run_task"), true);
+    } finally {
+      try {
+        await client.close();
+      } finally {
+        rmSync(configRoot, { recursive: true, force: true });
+      }
+    }
+  }
+});
 
 test("MCP and Codex client metadata use the shared package VERSION, and stdio returns structured tool errors", async () => {
   const { VERSION } = await import(VERSION_MODULE.href) as { VERSION: unknown };
