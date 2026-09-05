@@ -92,7 +92,7 @@ This repository used Bridge to generate its CI workflow, Bug Report template, an
 | Apply only after exact `APPLY`, with base-HEAD and repository-state revalidation; unborn repositories support added 100644 text files | Does not persist task/thread/evidence supervision history; no resource quota | Persistent task/audit history |
 | Commit an already-`APPLY`ed controlled patch only after exact `COMMIT`; Bridge never pushes | Does not automatically publish or create a Release | — |
 | Controlled-patch proposals/applied history and the managed workspace catalog survive restarts | — | Carefully explore multi-agent orchestration |
-| Thirteen local MCP tools over STDIO | — | — |
+| Sixteen local MCP tools over STDIO, including workspace-bound Codex Desktop thread discovery/read and supervised read-only ephemeral-fork tasks | — | — |
 
 ## Quick start
 
@@ -161,8 +161,11 @@ Use absolute paths. If the client already supplies a suitable `PATH`, the `env` 
 
 If you use DSH and `DEEPSEEK_API_KEY` is set in the environment Bridge runs under (for example, your shell or launcher environment), Bridge forwards it to DSH—it is the only credential environment variable Bridge forwards. Do not put it in the `env` override here or in any config file—secrets do not belong in configuration.
 
-Reconnect the integration and confirm these ten current V1 tools are visible:
+Reconnect the integration and confirm these sixteen current V1 tools are visible:
 
+- `list_codex_threads`
+- `read_codex_thread`
+- `run_task_from_codex_thread`
 - `run_task`
 - `task_result`
 - `control_task`
@@ -173,6 +176,11 @@ Reconnect the integration and confirm these ten current V1 tools are visible:
 - `refine_controlled_patch`
 - `submit_controlled_patch`
 - `apply_controlled_patch`
+- `commit_controlled_patch`
+- `configure_validation_profile`
+- `validate_controlled_patch`
+
+The Codex thread bridge treats an existing Desktop/Codex thread as read-only context. It validates the registered workspace on every read, bounds the history projection, and forces an `ephemeral` fork. `continue`, `steer`, and `interrupt` operate on that fork in the same Bridge worker app-server session; the original thread is never resumed or modified. The task/thread mapping is process-local.
 
 ### 5. Run the first read-only task
 
@@ -244,7 +252,7 @@ Read [Security design](docs/security.md), [Threat model](docs/threat-model.md), 
 
 ## Troubleshooting
 
-- **The thirteen tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
+- **The sixteen tools are missing:** reconnect the client and confirm its local STDIO MCP configuration launches `dist/src/mcp-stdio.js`.
 - **The client cannot find `node`, `codex`, or `dsh`:** client-launched processes may receive a different `PATH` from your terminal. Supply one containing these executables.
 - **Codex Desktop is installed but Bridge cannot find `codex`:** the desktop app does not guarantee that the Codex CLI is installed or present on the `PATH` inherited by the process that launches Bridge. Verify `codex` from that same launch environment.
 - **A Windows tunnel stops when PowerShell closes:** `tunnel-client run` is a foreground process. Keep its PowerShell window open or run it under an explicitly configured process manager.

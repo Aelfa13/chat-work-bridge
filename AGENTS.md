@@ -33,6 +33,9 @@ For production work also read:
 - Windows port baseline: supplemental, 352 total / 251 pass / 98 known platform failures / 3 skips / 0 unexplained failures.
 - Windows known failure classes: `WINDOWS_SPECIFIC_PATH_SEMANTICS=58`, `ENVIRONMENT_EOL_CONFIGURATION=37`, `PERMISSION_MODEL_SYMLINK=3`.
 - Windows baseline status: `ACCEPTED_WITH_KNOWN_PLATFORM_FAILURES`; upstream regression is `NOT_PROVEN`.
+- `feature/windows-chatgpt-desktop` now contains Codex Thread Bridge v1; the latest post-feature verification snapshot is 367 total / 265 pass / 99 explained failures / 3 skips / 0 unexplained failures. The additional explained class is one pre-existing full-suite process-timing variance; the bridge gate itself remains green.
+- Post-feature failure classes are `WINDOWS_SPECIFIC_PATH_SEMANTICS=58`, `ENVIRONMENT_EOL_CONFIGURATION=37`, `PERMISSION_MODEL_SYMLINK=3`, and `FULL_SUITE_PROCESS_TIMING_VARIANCE=1`.
+- Codex Thread Bridge v1 adds workspace-bound bounded thread list/read and read-only `ephemeral` fork tasks; source threads are never resumed and worker mapping is process-local.
 - Authoritative upstream CI: `ubuntu-latest`, Node.js 22, `npm test`; Windows is not in the upstream CI matrix.
 - Production direct edit: forbidden for daily development
 - Git write policy: MANUAL

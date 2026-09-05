@@ -93,7 +93,7 @@ Chat 保留需求背景、前面的设计取舍和已经发生过的失败；Cod
 | 对已 `APPLY` 的受控补丁仅在精确 `COMMIT` 后创建一个 Git commit；Bridge 绝不 push | 不会自动发布或创建 Release | — |
 | 每个已登记工作区最多一个固定校验 profile（精确 `CONFIGURE`），对保留提案按需 `validate_controlled_patch`（PASS/FAIL/INCOMPLETE） | 校验不是主机级沙箱；临时 worktree 只隔离已登记工作区 | — |
 | 受控补丁提案/应用历史、managed 工作区目录与 validation profile 跨重启保留 | — | 谨慎探索多 agent 编排 |
-| 通过 STDIO 提供十三个本地 MCP 工具 | — | — |
+| 通过 STDIO 提供十六个本地 MCP 工具，并可按已登记 workspace 发现/读取 Codex Desktop threads，再从 source thread 建立只读 ephemeral fork task | — | — |
 
 ## Quick Start
 
@@ -162,8 +162,11 @@ npm run build
 
 使用 DSH 时，若 `DEEPSEEK_API_KEY` 已设置在 Bridge 进程运行时的环境变量中（例如 shell 或启动器环境），Bridge 会将其转发给 DSH——这是 Bridge 转发的唯一凭据环境变量。不要把它写进这里的 `env` 覆盖或任何配置文件——密钥不应落入配置。
 
-重新连接集成，并确认能看到以下十三个当前 V1 工具：
+重新连接集成，并确认能看到以下十六个当前 V1 工具：
 
+- `list_codex_threads`
+- `read_codex_thread`
+- `run_task_from_codex_thread`
 - `run_task`
 - `task_result`
 - `control_task`
@@ -177,6 +180,8 @@ npm run build
 - `commit_controlled_patch`
 - `configure_validation_profile`
 - `validate_controlled_patch`
+
+Codex thread bridge 只把 Desktop/Codex thread 当作只读上下文来源：每次都按已登记 workspace 校验 `cwd`，读取历史保持有界，随后强制创建 `ephemeral` fork。`continue`、`steer` 和 `interrupt` 在同一个 Bridge worker app-server session 中作用于 fork；不会 resume 或修改 original thread。该 task/thread 映射只存在于当前 Bridge 进程。
 
 ### 5. 第一次只读任务
 
@@ -279,7 +284,7 @@ npm run mcp:stdio -- /absolute/path/to/workspaces.json
 
 ## 故障排查
 
-- **看不到十三个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
+- **看不到十六个工具：** 重新连接客户端，并确认其本地 STDIO MCP 配置启动了 `dist/src/mcp-stdio.js`。
 - **客户端找不到 `node`、`codex` 或 `dsh`：** 客户端启动的进程可能使用不同于终端的 `PATH`；请提供同时包含这些可执行文件的路径。
 - **已经安装 Codex Desktop，但 Bridge 找不到 `codex`：** 安装桌面应用不代表 Codex CLI 一定已安装，也不代表它一定存在于启动 Bridge 的进程所继承的 `PATH`；请在同一个启动环境中验证 `codex`。
 - **Windows 上关闭 PowerShell 后 tunnel 停止：** `tunnel-client run` 是前台进程；请保持该 PowerShell 窗口开启，或显式交给进程管理器运行。

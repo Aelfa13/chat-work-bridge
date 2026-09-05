@@ -88,6 +88,44 @@ environments:
       no_unexplained_known_failure_increase: true
       targeted_windows_validation_required: true
       known_failures_should_decrease: true
+    codex_thread_bridge_v1_gate:
+      status: "PASS_WITH_EXPLAINED_PREEXISTING_TIMING_VARIANCE"
+      branch: "feature/windows-chatgpt-desktop"
+      added_tools:
+        - "list_codex_threads"
+        - "read_codex_thread"
+        - "run_task_from_codex_thread"
+      added_tests: 15
+      total: 367
+      pass: 265
+      known_fail: 99
+      skip: 3
+      unexplained_failures: 0
+      full_suite_stability: "VARIANT_EXPLAINED_PREEXISTING_TIMING"
+      failure_classes:
+        WINDOWS_SPECIFIC_PATH_SEMANTICS:
+          count: 58
+          classification: "WINDOWS_PLATFORM"
+        ENVIRONMENT_EOL_CONFIGURATION:
+          count: 37
+          classification: "ENVIRONMENT"
+        PERMISSION_MODEL_SYMLINK:
+          count: 3
+          classification: "PERMISSION_MODEL"
+        FULL_SUITE_PROCESS_TIMING_VARIANCE:
+          count: 1
+          classification: "PREEXISTING_TEST_HARNESS_VARIANCE"
+          representative_tests:
+            - "direct child exit does not restart an existing TERM to KILL deadline"
+          mechanism: "A synthetic 120ms Darwin process-group signal timing assertion can miss under full-suite scheduling; isolated repetition passed 5/5 and the test does not execute the bridge path."
+      source_thread_policy: "READ_ONLY_SOURCE_FORCED_EPHEMERAL_FORK"
+      worker_session: "ONE_APP_SERVER_PROCESS_FOR_FIRST_TURN_AND_SUPERVISOR_CONTINUATION"
+      source_resume: false
+      task_mapping: "PROCESS_LOCAL"
+      network_access: false
+      experimental_api: false
+      permission_profile_lifecycle: false
+      stopwatch_e2e: "PASS"
   production:
     enabled: false
     role: "N/A_no_real_production_runtime"

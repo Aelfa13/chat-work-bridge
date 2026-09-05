@@ -1,6 +1,24 @@
 # MCP tool reference
 
-This is the tool surface of Engineering Bridge V1 (1.4.2). The local STDIO MCP server exposes thirteen tools.
+This is the tool surface of Engineering Bridge V1 (1.4.2). The local STDIO MCP server exposes sixteen tools.
+
+## `list_codex_threads`
+
+Inputs: `workspace_id`, optional `limit` (integer 1–50), optional `cursor` (non-empty, at most 4096 UTF-8 bytes), and optional `source_kinds` (at most eight values from the Codex source-kind allowlist).
+
+Resolves the workspace root from the trusted registry and calls `thread/list` with that exact canonical root as `cwd`. It returns only bounded thread metadata: `thread_id`, optional `name`/`preview`, optional timestamps, optional `source_kind`, `status`, and `ephemeral`. Threads whose returned `cwd` is not the registered root are omitted. It never resumes or changes a thread.
+
+## `read_codex_thread`
+
+Inputs: `workspace_id`, `thread_id`, and optional `max_turns` (integer 1–10, default 5).
+
+Calls `thread/read` with `includeTurns: true`, rechecks the returned canonical `cwd` on every call, and returns only bounded user/assistant text with turn IDs and statuses. The result is capped at five turns by default, ten at most, 4 KiB per text field, and 16 KiB in total; truncation is marked `[truncated]`. Commands, stderr, diffs, attachments, raw item metadata, and session metadata are omitted. It never resumes or changes the source thread.
+
+## `run_task_from_codex_thread`
+
+Inputs: `workspace_id`, `source_thread_id`, `instruction`, and optional `model`/`reasoning_effort`. No caller-supplied `cwd`, root, session, resume, fork, sandbox, permission, or network fields are accepted.
+
+Reads and validates the source thread, permits only the verified safe `notLoaded` source status, then forces `thread/fork` with `ephemeral: true`. The fork must have a different ID, the exact `forkedFromId`, and `ephemeral: true`. The task keeps that fork and its one app-server process in memory for its first turn, `continue`, `steer`, and `interrupt`; the source is never resumed. The worker uses approval `never`, `sandboxPolicy: { type: "readOnly", networkAccess: false }`, and no permission profile or experimental API. The task/thread mapping is process-local and is lost on Bridge restart.
 
 ## `run_task`
 
@@ -17,6 +35,8 @@ Returns the task state, readiness, fixed `executor`, and current bounded `eviden
 Conditional fields:
 
 - `thread_id`: present only for Codex tasks once a real native app-server thread exists. DSH headless has no machine-resumable session seam, so DSH tasks never carry a fabricated `thread_id`.
+- `source_thread_id`: present only for `run_task_from_codex_thread`, identifying the read-only Desktop/Codex source.
+- `thread_mode`: present only for fork tasks and currently equals `ephemeral_fork`.
 - `partial_output`: present only when a genuine interrupt produced real partial output (for example, DSH cached partial stdout or the last completed Codex agent message). The task state is still `failed`; `partial_output` is never completed `output` and never appears in `error`.
 
 `evidence` contains bounded command-execution and file-change items. When the existing bounds truncate or evict evidence, explicit markers are returned: strings cut by the size bound end with `[truncated]`, an oversized changes list gains a `[truncated: N additional changes omitted]` entry, and evidence evicted by the total count limit is reported through a synthetic `evidence-drop` item. These markers mean the diagnostic information is incomplete.
@@ -27,12 +47,14 @@ Inputs: `task_id`, `action`, and optional `instruction`.
 
 The actions are state-specific:
 
-- `continue`: while `waiting_for_supervisor_review`, requires a non-empty instruction, queues another read-only turn, and preserves app-server thread continuity with `thread/resume` for Codex. For DSH, `continue` starts a new headless execution; there is no native resume.
+- `continue`: while `waiting_for_supervisor_review`, requires a non-empty instruction, and queues another read-only turn. Ordinary Codex `run_task` uses `thread/resume`; `run_task_from_codex_thread` uses the same live app-server and the same ephemeral fork with `turn/start`, so the source thread is never resumed. For DSH, `continue` starts a new headless execution; there is no native resume.
 - `steer`: while `running`, requires a non-empty instruction and steers the active turn (Codex only).
 - `interrupt`: while `running`, interrupts the active turn. When interruption completes, the task ends as `failed`; genuine partial output may be exposed as `partial_output`.
 - `accept`: while `waiting_for_supervisor_review`, marks the reviewed output `completed` without starting another turn.
 
 Running generated/refined proposal tasks also accept `interrupt`, and Codex proposal tasks accept `steer`; completed proposal tasks do not accept any action. Invalid actions for the current state return `INVALID_STATE_TRANSITION`. Executor runs have a 15-minute hard deadline; active Codex turns also have a two-minute protocol-inactivity watchdog, reset only by an app-server notification whose `threadId` and `turnId` exactly match the active turn. Other threads, other turns, global notifications, and RPC responses do not reset it. Short Codex RPC calls have a separate 30-second bound. There is no automatic acceptance or persistent task supervision state.
+
+The three Codex thread tools are workspace-bound and process-local. A source thread is context-only; the Bridge-owned ephemeral fork is the only thread that receives worker turns. Closing, accepting, failing, interrupting, or losing the Bridge process closes the worker session where applicable; no durable worker mapping is written.
 
 ## `bind_project`
 
