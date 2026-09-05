@@ -60,6 +60,16 @@ export class RegisteredWorkspaceRegistry {
     return registration.root;
   }
 
+  resolveCanonicalRoot(workspaceId: string): string {
+    const registration = this.registrations.get(workspaceId);
+    if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
+    return registration.canonicalRoot;
+  }
+
+  canonicalizeRoot(root: string): string {
+    return this.canonicalize(root);
+  }
+
   resolveExecution(workspaceId: string): { root: string; allowWrite: boolean } {
     const registration = this.registrations.get(workspaceId);
     if (registration === undefined) throw new CoreError("UNKNOWN_WORKSPACE");
