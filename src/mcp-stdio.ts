@@ -9,6 +9,7 @@ import { z } from "zod";
 
 import { CodexExecutor } from "./executors/codex-executor.js";
 import { DshExecutor } from "./executors/dsh-executor.js";
+import { CodexThreadService } from "./threads/codex-thread-service.js";
 import { VERSION } from "./version.js";
 import { CoreError, serializeError } from "./core/errors.js";
 import { RegisteredWorkspaceTaskService } from "./tasks/registered-workspace-task-service.js";
@@ -37,6 +38,19 @@ const ProjectRootEntrySchema = z.object({
 
 const WorkspaceConfigSchema = z.array(z.union([WorkspaceEntrySchema, ProjectRootEntrySchema]));
 
+const CodexSourceKindSchema = z.enum([
+  "cli",
+  "vscode",
+  "exec",
+  "appServer",
+  "subAgent",
+  "subAgentReview",
+  "subAgentCompact",
+  "subAgentThreadSpawn",
+  "subAgentOther",
+  "unknown"
+]);
+
 const ValidationStepSchema = z.object({
   name: z.string().min(1),
   argv: z.array(z.string()).min(1),
@@ -52,6 +66,7 @@ const ValidationProfileSchema = z.object({
 
 type WorkspaceEntry = z.infer<typeof WorkspaceEntrySchema>;
 type ProjectRootEntry = z.infer<typeof ProjectRootEntrySchema>;
+type CodexSourceKind = z.infer<typeof CodexSourceKindSchema>;
 
 function isProjectRootEntry(entry: WorkspaceEntry | ProjectRootEntry): entry is ProjectRootEntry {
   return "kind" in entry;
@@ -126,6 +141,7 @@ async function main(): Promise<void> {
     catalog,
     projectRootEntries.map(({ root }) => root)
   );
+  const codexThreads = new CodexThreadService(registry);
   const service = new RegisteredWorkspaceTaskService(
     registry,
     (executor, workspaceRoot) => {
@@ -133,7 +149,8 @@ async function main(): Promise<void> {
         case "codex": return new CodexExecutor(workspaceRoot);
         case "dsh": return new DshExecutor(workspaceRoot);
       }
-    }
+    },
+    (request) => codexThreads.startWorker(request)
   );
   const controlledPatches = new ControlledPatchService(
     registry,
@@ -153,6 +170,66 @@ async function main(): Promise<void> {
     validationRunner
   );
   const server = new McpServer({ name: "engineering-bridge", version: VERSION });
+
+  server.registerTool("list_codex_threads", {
+    description: "List bounded metadata for Codex/Desktop threads whose working directory is an exact registered workspace. This never resumes or changes a thread.",
+    inputSchema: z.object({
+      workspace_id: z.string().min(1),
+      limit: z.number().int().min(1).max(50).optional(),
+      cursor: z.string().min(1).max(4096).optional(),
+      source_kinds: z.array(CodexSourceKindSchema).max(8).optional()
+    }).strict()
+  }, async ({ workspace_id, limit, cursor, source_kinds }) => {
+    try {
+      return jsonContent(await codexThreads.listThreads({
+        workspace_id,
+        ...(limit === undefined ? {} : { limit }),
+        ...(cursor === undefined ? {} : { cursor }),
+        ...(source_kinds === undefined ? {} : { source_kinds })
+      }));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("read_codex_thread", {
+    description: "Read a bounded projection of one Codex/Desktop thread in an exact registered workspace. This uses thread/read only and never resumes or changes the source thread.",
+    inputSchema: z.object({
+      workspace_id: z.string().min(1),
+      thread_id: z.string().min(1),
+      max_turns: z.number().int().min(1).max(10).optional().default(5)
+    }).strict()
+  }, async ({ workspace_id, thread_id, max_turns }) => {
+    try {
+      return jsonContent(await codexThreads.readThread({ workspace_id, thread_id, max_turns }));
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
+
+  server.registerTool("run_task_from_codex_thread", {
+    description: "Run a supervised read-only task from a Codex/Desktop source thread. The source is read-only; Engineering Bridge always creates an ephemeral worker fork and never resumes the source.",
+    inputSchema: z.object({
+      workspace_id: z.string().min(1),
+      source_thread_id: z.string().min(1),
+      instruction: z.string().min(1),
+      model: z.string().min(1).optional(),
+      reasoning_effort: z.string().min(1).optional()
+    }).strict()
+  }, ({ workspace_id, source_thread_id, instruction, model, reasoning_effort }) => {
+    try {
+      const { taskId } = service.startTaskFromCodexThread({
+        workspace_id,
+        source_thread_id,
+        instruction,
+        ...(model === undefined ? {} : { model }),
+        ...(reasoning_effort === undefined ? {} : { reasoning_effort })
+      });
+      return jsonContent({ task_id: taskId });
+    } catch (error) {
+      return { isError: true, ...jsonContent({ error: serializeError(error) }) };
+    }
+  });
 
   server.registerTool("run_task", {
     description: "Run a read-only task with the selected executor in a pre-registered workspace. This tool does not modify workspace files.",
@@ -187,6 +264,8 @@ async function main(): Promise<void> {
       ...(view.source === undefined ? {} : { source: view.source }),
       ...(view.executor === undefined ? {} : { executor: view.executor }),
       ...(view.threadId === undefined ? {} : { thread_id: view.threadId }),
+      ...(view.sourceThreadId === undefined ? {} : { source_thread_id: view.sourceThreadId }),
+      ...(view.threadMode === undefined ? {} : { thread_mode: view.threadMode }),
       ready: view.ready,
       ...(view.output === undefined ? {} : { output: view.output }),
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),

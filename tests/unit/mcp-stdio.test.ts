@@ -85,8 +85,11 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       "control_task",
       "create_project",
       "generate_controlled_patch",
+      "list_codex_threads",
+      "read_codex_thread",
       "refine_controlled_patch",
       "run_task",
+      "run_task_from_codex_thread",
       "submit_controlled_patch",
       "task_result",
       "validate_controlled_patch"
@@ -102,6 +105,12 @@ test("MCP and Codex client metadata use the shared package VERSION, and stdio re
       assert.equal(properties?.model?.minLength, 1);
       assert.equal(properties?.reasoning_effort?.type, "string");
       assert.equal(properties?.reasoning_effort?.minLength, 1);
+    }
+    for (const name of ["list_codex_threads", "read_codex_thread", "run_task_from_codex_thread"]) {
+      const properties = schemas.get(name)?.properties;
+      assert.equal(properties?.workspace_id?.type, "string");
+      assert.equal(properties?.cwd, undefined);
+      assert.equal(properties?.root, undefined);
     }
 
     // COMMIT requires every field and the exact literal confirmation.
@@ -266,6 +275,23 @@ test("task_result honestly reports the fixed executor and never fabricates a thr
     assert.equal(dshView.executor, "dsh");
     assert.equal("thread_id" in dshView, false);
     assert.deepEqual(dshView.error, {
+      code: "UNKNOWN_WORKSPACE",
+      message: "The requested workspace is not registered."
+    });
+
+    const forkRun = await call("run_task_from_codex_thread", {
+      workspace_id: "missing",
+      source_thread_id: "source-1",
+      instruction: "inspect"
+    });
+    const forkTaskId = forkRun.body.task_id;
+    assert.equal(typeof forkTaskId, "string");
+    if (typeof forkTaskId !== "string") return;
+    const forkView = await waitForTerminal(forkTaskId);
+    assert.equal(forkView.executor, "codex");
+    assert.equal(forkView.source_thread_id, "source-1");
+    assert.equal(forkView.thread_mode, "ephemeral_fork");
+    assert.deepEqual(forkView.error, {
       code: "UNKNOWN_WORKSPACE",
       message: "The requested workspace is not registered."
     });

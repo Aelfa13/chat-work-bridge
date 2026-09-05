@@ -5,6 +5,11 @@ import type { SerializedError } from "../core/errors.js";
 import { CoreError } from "../core/errors.js";
 import type { Executor, ExecutorDiagnostics, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
+import type {
+  CodexThreadTaskRequest,
+  CodexThreadWorkerFactory,
+  CodexThreadWorkerSession
+} from "../threads/codex-thread-service.js";
 
 export type ExecutorName = "codex" | "dsh";
 
@@ -72,6 +77,8 @@ export interface ControlledTaskView {
   // provided by the caller, not produced by an executor.
   readonly source?: "submitted" | undefined;
   readonly threadId?: string | undefined;
+  readonly sourceThreadId?: string | undefined;
+  readonly threadMode?: "ephemeral_fork" | undefined;
   readonly ready?: boolean;
   readonly output?: string | undefined;
   readonly review_output?: string | undefined;
@@ -94,6 +101,8 @@ type InteractiveRecord = {
   state: ControlledTaskState; request: NormalizedRegisteredWorkspaceTaskRequest; evidence: readonly ExecutorEvidence[];
   executor?: Executor | undefined; threadId?: string | undefined; output?: string | undefined;
   partialOutput?: string | undefined; diagnostics?: ExecutorDiagnostics | undefined; error?: SerializedError | undefined;
+  sourceThreadId?: string | undefined; threadMode?: "ephemeral_fork" | undefined;
+  workerSession?: CodexThreadWorkerSession | undefined;
 };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
@@ -125,7 +134,8 @@ export class RegisteredWorkspaceTaskService {
 
   constructor(
     private readonly registry: RegisteredWorkspaceRegistry,
-    private readonly executorFactory: ExecutorFactory
+    private readonly executorFactory: ExecutorFactory,
+    private readonly threadWorkerFactory?: CodexThreadWorkerFactory
   ) {}
 
   runTask(
@@ -220,6 +230,26 @@ export class RegisteredWorkspaceTaskService {
     return { taskId };
   }
 
+  startTaskFromCodexThread(request: CodexThreadTaskRequest): { taskId: Id } {
+    if (this.threadWorkerFactory === undefined) throw new CoreError("UNSUPPORTED_ACTION");
+    const taskId = newId();
+    this.interactive.set(taskId, {
+      state: "queued",
+      request: {
+        workspace_id: request.workspace_id,
+        instruction: request.instruction,
+        executor: "codex",
+        ...(request.model === undefined ? {} : { model: request.model }),
+        ...(request.reasoning_effort === undefined ? {} : { reasoning_effort: request.reasoning_effort })
+      },
+      evidence: [],
+      sourceThreadId: request.source_thread_id,
+      threadMode: "ephemeral_fork"
+    });
+    queueMicrotask(() => void this.executeInteractive(taskId));
+    return { taskId };
+  }
+
   taskView(taskId: unknown): ControlledTaskView | undefined {
     if (!isId(taskId)) return undefined;
     const record = this.interactive.get(taskId);
@@ -250,6 +280,8 @@ export class RegisteredWorkspaceTaskService {
       state: record.state,
       executor: record.request.executor,
       evidence: record.evidence,
+      ...(record.sourceThreadId === undefined ? {} : { sourceThreadId: record.sourceThreadId }),
+      ...(record.threadMode === undefined ? {} : { threadMode: record.threadMode }),
       ...(record.threadId === undefined ? {} : { threadId: record.threadId }),
       ...(record.diagnostics === undefined ? {} : { diagnostics: record.diagnostics })
     };
@@ -283,16 +315,27 @@ export class RegisteredWorkspaceTaskService {
   ): Promise<ControlledTaskView> {
     if (action === "accept") {
       if (record.state !== "waiting_for_supervisor_review") throw new CoreError("INVALID_STATE_TRANSITION");
+      await this.closeWorkerSession(record);
       record.state = "completed";
       this.interactiveTerminalTaskIds.push(taskId);
       this.trimInteractiveTerminalTasks();
     } else if (action === "continue") {
       if (record.state !== "waiting_for_supervisor_review" || !instruction?.trim()) throw new CoreError("INVALID_STATE_TRANSITION");
+      if (record.threadMode === "ephemeral_fork" && record.workerSession === undefined) {
+        throw new CoreError("INVALID_STATE_TRANSITION");
+      }
       record.request = { ...record.request, instruction };
       record.diagnostics = undefined;
       record.state = "queued";
       queueMicrotask(() => void this.executeInteractive(taskId));
     } else if (action === "steer") {
+      if (record.threadMode === "ephemeral_fork") {
+        if (record.state !== "running" || !instruction?.trim() || record.workerSession === undefined) {
+          throw new CoreError("INVALID_STATE_TRANSITION");
+        }
+        await record.workerSession.steer(instruction);
+        return this.taskView(taskId)!;
+      }
       // DSH headless has no steer seam: the action is unsupported for the
       // executor type, not an invalid state transition. Codex steer behavior
       // is unchanged.
@@ -300,6 +343,13 @@ export class RegisteredWorkspaceTaskService {
       if (record.state !== "running" || !instruction?.trim() || !record.executor?.steer) throw new CoreError("INVALID_STATE_TRANSITION");
       await record.executor.steer(instruction);
     } else {
+      if (record.threadMode === "ephemeral_fork") {
+        if (record.state !== "running" || record.workerSession === undefined) {
+          throw new CoreError("INVALID_STATE_TRANSITION");
+        }
+        await record.workerSession.interrupt();
+        return this.taskView(taskId)!;
+      }
       if (record.state !== "running" || !record.executor?.interrupt) throw new CoreError("INVALID_STATE_TRANSITION");
       await record.executor.interrupt();
     }
@@ -335,6 +385,10 @@ export class RegisteredWorkspaceTaskService {
   private async executeInteractive(taskId: Id): Promise<void> {
     const record = this.interactive.get(taskId);
     if (!record) return;
+    if (record.threadMode === "ephemeral_fork") {
+      await this.executeEphemeralThreadTask(taskId, record);
+      return;
+    }
     record.state = "running";
     try {
       const registration = this.registry.resolveExecution(record.request.workspace_id);
@@ -370,6 +424,60 @@ export class RegisteredWorkspaceTaskService {
       record.error = serializeError(error);
       this.recordInteractiveTerminalTask(taskId);
     }
+  }
+
+  private async executeEphemeralThreadTask(taskId: Id, record: InteractiveRecord): Promise<void> {
+    record.state = "running";
+    try {
+      let worker = record.workerSession;
+      if (worker === undefined) {
+        if (record.threadId !== undefined || record.sourceThreadId === undefined || this.threadWorkerFactory === undefined) {
+          throw new CoreError("INVALID_STATE_TRANSITION");
+        }
+        worker = await this.threadWorkerFactory({
+          workspace_id: record.request.workspace_id,
+          source_thread_id: record.sourceThreadId,
+          instruction: record.request.instruction,
+          ...(record.request.model === undefined ? {} : { model: record.request.model }),
+          ...(record.request.reasoning_effort === undefined ? {} : { reasoning_effort: record.request.reasoning_effort })
+        });
+        record.workerSession = worker;
+        record.threadId = worker.workerThreadId;
+      }
+      const result = await worker.run(taskId, record.request.instruction, (items) => {
+        record.evidence = items;
+      });
+      record.threadId = result.threadId ?? record.threadId;
+      record.evidence = result.evidence ?? record.evidence;
+      if (result.kind === "failed") {
+        record.state = "failed";
+        record.error = result.error;
+        await this.closeWorkerSession(record);
+        this.recordInteractiveTerminalTask(taskId);
+      } else if (result.kind === "interrupted") {
+        record.partialOutput = result.output;
+        record.output = undefined;
+        record.state = "failed";
+        record.error = interruptedError();
+        await this.closeWorkerSession(record);
+        this.recordInteractiveTerminalTask(taskId);
+      } else {
+        record.diagnostics = result.diagnostics;
+        record.state = "waiting_for_supervisor_review";
+        record.output = result.output;
+      }
+    } catch (error) {
+      record.state = "failed";
+      record.error = serializeError(error);
+      await this.closeWorkerSession(record);
+      this.recordInteractiveTerminalTask(taskId);
+    }
+  }
+
+  private async closeWorkerSession(record: InteractiveRecord): Promise<void> {
+    const worker = record.workerSession;
+    record.workerSession = undefined;
+    await worker?.close().catch(() => {});
   }
 
   private async run(
