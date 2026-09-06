@@ -6,6 +6,7 @@ import { CoreError } from "../core/errors.js";
 import type { Executor, ExecutorDiagnostics, ExecutorEvidence } from "../executors/executor.js";
 import { RegisteredWorkspaceRegistry } from "../workspaces/registered-workspace-registry.js";
 import type {
+  CodexThreadAudit,
   CodexThreadTaskRequest,
   CodexThreadWorkerFactory,
   CodexThreadWorkerSession
@@ -84,6 +85,7 @@ export interface ControlledTaskView {
   readonly review_output?: string | undefined;
   readonly partial_output?: string | undefined;
   readonly evidence?: readonly ExecutorEvidence[];
+  readonly threadAudit?: CodexThreadAudit | undefined;
   readonly diagnostics?: ControlledTaskDiagnostics;
   readonly error?: SerializedError | undefined;
 }
@@ -103,6 +105,7 @@ type InteractiveRecord = {
   partialOutput?: string | undefined; diagnostics?: ExecutorDiagnostics | undefined; error?: SerializedError | undefined;
   sourceThreadId?: string | undefined; threadMode?: "ephemeral_fork" | undefined;
   workerSession?: CodexThreadWorkerSession | undefined;
+  threadAudit?: CodexThreadAudit | undefined;
 };
 
 const MAX_TERMINAL_TASK_HISTORY = 100;
@@ -283,6 +286,9 @@ export class RegisteredWorkspaceTaskService {
       ...(record.sourceThreadId === undefined ? {} : { sourceThreadId: record.sourceThreadId }),
       ...(record.threadMode === undefined ? {} : { threadMode: record.threadMode }),
       ...(record.threadId === undefined ? {} : { threadId: record.threadId }),
+      ...(record.threadAudit === undefined && record.workerSession === undefined
+        ? {}
+        : { threadAudit: record.threadAudit ?? record.workerSession?.getThreadAudit() }),
       ...(record.diagnostics === undefined ? {} : { diagnostics: record.diagnostics })
     };
     if (record.state === "queued" || record.state === "running") return { ...base, ready: false };
@@ -476,8 +482,10 @@ export class RegisteredWorkspaceTaskService {
 
   private async closeWorkerSession(record: InteractiveRecord): Promise<void> {
     const worker = record.workerSession;
+    if (worker === undefined) return;
+    await worker.close().catch(() => {});
+    record.threadAudit = worker.getThreadAudit();
     record.workerSession = undefined;
-    await worker?.close().catch(() => {});
   }
 
   private async run(

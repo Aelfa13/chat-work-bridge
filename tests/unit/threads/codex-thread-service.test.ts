@@ -325,6 +325,8 @@ test("readThread exposes only bounded user and assistant text", async () => {
 
   const result = await service.readThread({ workspace_id: "known", thread_id: "source-1" });
 
+  assert.equal(result.turn_count, 6);
+  assert.equal(result.updated_at, 2);
   assert.equal(result.turns.length, 5);
   assert.equal(result.truncated, true);
   assert.equal(result.truncation, "[truncated]");
@@ -332,6 +334,18 @@ test("readThread exposes only bounded user and assistant text", async () => {
   assert.equal(JSON.stringify(result).includes("secret command"), false);
   assert.equal(JSON.stringify(result).includes("secret diff"), false);
   assert.equal(result.turns.some((turn) => turn.user_text?.endsWith("[truncated]") === true), true);
+});
+
+test("readThread omits malformed updatedAt without fabricating metadata", async () => {
+  const workspaceRoot = root();
+  const { service } = makeService(workspaceRoot, {
+    sourceThread: sourceThread(workspaceRoot, { updatedAt: "not-a-timestamp" })
+  });
+
+  const result = await service.readThread({ workspace_id: "known", thread_id: "source-1" });
+
+  assert.equal(result.turn_count, 1);
+  assert.equal("updated_at" in result, false);
 });
 
 test("readThread fails closed when the app-server returns a foreign cwd", async () => {
@@ -437,6 +451,19 @@ test("startWorker forces an ephemeral fork and reuses one app-server for two tur
     assert.equal(first.output, "first");
     assert.equal(second.output, "second");
   }
+  const liveAudit = worker.getThreadAudit();
+  assert.match(liveAudit.worker_session_id, /^[0-9a-f-]{36}$/u);
+  assert.equal(liveAudit.fork_rpc_count, 1);
+  assert.equal(liveAudit.source_thread_read_count, 1);
+  assert.equal(liveAudit.source_thread_resume_count, 0);
+  assert.equal(liveAudit.source_thread_turn_start_count, 0);
+  assert.equal(liveAudit.worker_thread_turn_start_count, 2);
+  assert.equal(liveAudit.source_turn_count_before, 1);
+  assert.equal(liveAudit.worker_session_closed, false);
+  assert.equal(JSON.stringify(liveAudit).includes("inspect this project"), false);
+  assert.equal(JSON.stringify(liveAudit).includes("secret command"), false);
+  assert.equal(JSON.stringify(liveAudit).includes("sessionId"), false);
+  assert.equal(JSON.stringify(liveAudit).toLowerCase().includes("pid"), false);
   assert.equal(invocations[0]?.calls.some(({ method }) => method === "thread/resume"), false);
   assert.deepEqual(invocations[0]?.calls.find(({ method }) => method === "thread/fork")?.params, {
     threadId: "source-1",
@@ -455,6 +482,33 @@ test("startWorker forces an ephemeral fork and reuses one app-server for two tur
   assert.equal(JSON.stringify(turns?.[0]?.params).includes("workspace-write"), false);
   assert.equal(JSON.stringify(turns?.[0]?.params).includes("danger-full-access"), false);
   await worker.close();
+  const terminalAudit = worker.getThreadAudit();
+  assert.equal(terminalAudit.source_thread_read_count, 2);
+  assert.equal(terminalAudit.source_turn_count_after, 1);
+  assert.equal(terminalAudit.source_updated_at_before, 2);
+  assert.equal(terminalAudit.source_updated_at_after, 2);
+  assert.equal(terminalAudit.source_terminal_snapshot_status, "available");
+  assert.equal(terminalAudit.worker_session_closed, true);
+});
+
+test("each worker connection receives a distinct bounded session identity", async () => {
+  const workspaceRoot = root();
+  const { service } = makeService(workspaceRoot);
+  const first = await service.startWorker({
+    workspace_id: "known",
+    source_thread_id: "source-1",
+    instruction: "first"
+  });
+  const firstSessionId = first.workerSessionId;
+  await first.close();
+
+  const second = await service.startWorker({
+    workspace_id: "known",
+    source_thread_id: "source-1",
+    instruction: "second"
+  });
+  assert.notEqual(second.workerSessionId, firstSessionId);
+  await second.close();
 });
 
 test("worker hard deadline, inactivity deadline, and app-server exit settle with cleanup", async () => {
@@ -492,5 +546,7 @@ test("worker hard deadline, inactivity deadline, and app-server exit settle with
   assert.equal(exited.kind, "failed");
   if (exited.kind === "failed") assert.equal(exited.error.code, "CODEX_PROTOCOL_ERROR");
   await exitWorker.close();
+  assert.equal(exitWorker.getThreadAudit().source_terminal_snapshot_status, "unavailable");
+  assert.equal(exitWorker.getThreadAudit().worker_session_closed, true);
   assert.ok(exitInvocations[0]?.signals.length);
 });

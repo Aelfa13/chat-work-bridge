@@ -12,13 +12,13 @@ Resolves the workspace root from the trusted registry and calls `thread/list` wi
 
 Inputs: `workspace_id`, `thread_id`, and optional `max_turns` (integer 1–10, default 5).
 
-Calls `thread/read` with `includeTurns: true`, rechecks the returned canonical `cwd` on every call, and returns only bounded user/assistant text with turn IDs and statuses. The result is capped at five turns by default, ten at most, 4 KiB per text field, and 16 KiB in total; truncation is marked `[truncated]`. Commands, stderr, diffs, attachments, raw item metadata, and session metadata are omitted. It never resumes or changes the source thread.
+Calls `thread/read` with `includeTurns: true`, rechecks the returned canonical `cwd` on every call, and returns only bounded user/assistant text with turn IDs and statuses. The result also includes the complete `turn_count` and a numeric `updated_at` when the runtime supplies one. The projection is capped at five turns by default, ten at most, 4 KiB per text field, and 16 KiB in total; truncation is marked `[truncated]`. Commands, stderr, diffs, attachments, raw item metadata, and session metadata are omitted. It never resumes or changes the source thread.
 
 ## `run_task_from_codex_thread`
 
 Inputs: `workspace_id`, `source_thread_id`, `instruction`, and optional `model`/`reasoning_effort`. No caller-supplied `cwd`, root, session, resume, fork, sandbox, permission, or network fields are accepted.
 
-Reads and validates the source thread, permits only the verified safe `notLoaded` source status, then forces `thread/fork` with `ephemeral: true`. The fork must have a different ID, the exact `forkedFromId`, and `ephemeral: true`. The task keeps that fork and its one app-server process in memory for its first turn, `continue`, `steer`, and `interrupt`; the source is never resumed. The worker uses approval `never`, `sandboxPolicy: { type: "readOnly", networkAccess: false }`, and no permission profile or experimental API. The task/thread mapping is process-local and is lost on Bridge restart.
+Reads and validates the source thread, permits only the verified safe `notLoaded` source status, then forces `thread/fork` with `ephemeral: true`. The fork must have a different ID, the exact `forkedFromId`, and `ephemeral: true`. The task keeps that fork and its one app-server process in memory for its first turn, `continue`, `steer`, and `interrupt`; the source is never resumed. The worker uses approval `never`, `sandboxPolicy: { type: "readOnly", networkAccess: false }`, and no permission profile or experimental API. The task/thread mapping is process-local and is lost on Bridge restart. `task_result` exposes a separate bounded `thread_audit` for ephemeral fork tasks: fixed RPC counters, source before/after turn snapshots, a Bridge-owned worker-session identity, and real close status. It never exposes RPC parameters, responses, OS PIDs, Codex session IDs, prompts, transcripts, commands, diffs, or credentials.
 
 ## `run_task`
 
@@ -37,9 +37,10 @@ Conditional fields:
 - `thread_id`: present only for Codex tasks once a real native app-server thread exists. DSH headless has no machine-resumable session seam, so DSH tasks never carry a fabricated `thread_id`.
 - `source_thread_id`: present only for `run_task_from_codex_thread`, identifying the read-only Desktop/Codex source.
 - `thread_mode`: present only for fork tasks and currently equals `ephemeral_fork`.
+- `thread_audit`: present only for ephemeral fork tasks; it contains bounded counters and snapshots for the source/fork lifecycle, plus the Bridge worker-session identity and real close status.
 - `partial_output`: present only when a genuine interrupt produced real partial output (for example, DSH cached partial stdout or the last completed Codex agent message). The task state is still `failed`; `partial_output` is never completed `output` and never appears in `error`.
 
-`evidence` contains bounded command-execution and file-change items. When the existing bounds truncate or evict evidence, explicit markers are returned: strings cut by the size bound end with `[truncated]`, an oversized changes list gains a `[truncated: N additional changes omitted]` entry, and evidence evicted by the total count limit is reported through a synthetic `evidence-drop` item. These markers mean the diagnostic information is incomplete.
+`evidence` contains bounded command-execution and file-change items. `thread_audit` is independent of `evidence` and appears only for ephemeral fork tasks. When the existing bounds truncate or evict evidence, explicit markers are returned: strings cut by the size bound end with `[truncated]`, an oversized changes list gains a `[truncated: N additional changes omitted]` entry, and evidence evicted by the total count limit is reported through a synthetic `evidence-drop` item. These markers mean the diagnostic information is incomplete.
 
 ## `control_task`
 

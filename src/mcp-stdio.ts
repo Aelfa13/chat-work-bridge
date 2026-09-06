@@ -271,6 +271,7 @@ async function main(): Promise<void> {
       ...(view.review_output === undefined ? {} : { review_output: view.review_output }),
       ...(view.partial_output === undefined ? {} : { partial_output: view.partial_output }),
       evidence: view.evidence,
+      ...(view.threadAudit === undefined ? {} : { thread_audit: view.threadAudit }),
       ...(view.diagnostics === undefined ? {} : { diagnostics: view.diagnostics }),
       ...(view.error === undefined ? {} : { error: view.error }) };
     return jsonContent({

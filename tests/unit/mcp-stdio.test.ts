@@ -257,6 +257,7 @@ test("task_result honestly reports the fixed executor and never fabricates a thr
     const codexView = await waitForTerminal(codexTaskId);
     assert.equal(codexView.executor, "codex");
     assert.equal("thread_id" in codexView, false);
+    assert.equal("thread_audit" in codexView, false);
     assert.deepEqual(codexView.error, {
       code: "UNKNOWN_WORKSPACE",
       message: "The requested workspace is not registered."
@@ -274,6 +275,7 @@ test("task_result honestly reports the fixed executor and never fabricates a thr
     const dshView = await waitForTerminal(dshTaskId);
     assert.equal(dshView.executor, "dsh");
     assert.equal("thread_id" in dshView, false);
+    assert.equal("thread_audit" in dshView, false);
     assert.deepEqual(dshView.error, {
       code: "UNKNOWN_WORKSPACE",
       message: "The requested workspace is not registered."
@@ -291,6 +293,7 @@ test("task_result honestly reports the fixed executor and never fabricates a thr
     assert.equal(forkView.executor, "codex");
     assert.equal(forkView.source_thread_id, "source-1");
     assert.equal(forkView.thread_mode, "ephemeral_fork");
+    assert.equal("thread_audit" in forkView, false);
     assert.deepEqual(forkView.error, {
       code: "UNKNOWN_WORKSPACE",
       message: "The requested workspace is not registered."

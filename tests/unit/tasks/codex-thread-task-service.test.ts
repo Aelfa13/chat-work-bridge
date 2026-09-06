@@ -11,6 +11,7 @@ import {
   RegisteredWorkspaceTaskService
 } from "../../../src/tasks/registered-workspace-task-service.js";
 import type {
+  CodexThreadAudit,
   CodexThreadTaskRequest,
   CodexThreadWorkerSession
 } from "../../../src/threads/codex-thread-service.js";
@@ -34,10 +35,12 @@ async function waitForReady(
 class FakeWorker implements CodexThreadWorkerSession {
   readonly sourceThreadId = "source-1";
   readonly workerThreadId = "worker-1";
+  readonly workerSessionId = "worker-session-1";
   readonly runCalls: Array<{ taskId: Id; instruction: string }> = [];
   steerCalls: string[] = [];
   interruptCalls = 0;
   closeCalls = 0;
+  private closed = false;
   constructor(private readonly results: ExecutorResult[]) {}
 
   async run(
@@ -59,6 +62,25 @@ class FakeWorker implements CodexThreadWorkerSession {
 
   async close(): Promise<void> {
     this.closeCalls += 1;
+    this.closed = true;
+  }
+
+  getThreadAudit(): CodexThreadAudit {
+    return {
+      worker_session_id: this.workerSessionId,
+      source_thread_id: this.sourceThreadId,
+      worker_thread_id: this.workerThreadId,
+      fork_rpc_count: 1,
+      source_thread_read_count: this.closed ? 2 : 1,
+      source_thread_resume_count: 0,
+      source_thread_turn_start_count: 0,
+      worker_thread_turn_start_count: this.runCalls.length,
+      worker_thread_steer_count: this.steerCalls.length,
+      worker_thread_interrupt_count: this.interruptCalls,
+      source_turn_count_before: 1,
+      ...(this.closed ? { source_turn_count_after: 1, source_terminal_snapshot_status: "available" as const } : {}),
+      worker_session_closed: this.closed
+    };
   }
 }
 
@@ -104,6 +126,20 @@ test("continue reuses the same worker session and accept closes it", async () =>
     threadMode: "ephemeral_fork",
     threadId: "worker-1",
     evidence: [],
+    threadAudit: {
+      worker_session_id: "worker-session-1",
+      source_thread_id: "source-1",
+      worker_thread_id: "worker-1",
+      fork_rpc_count: 1,
+      source_thread_read_count: 1,
+      source_thread_resume_count: 0,
+      source_thread_turn_start_count: 0,
+      worker_thread_turn_start_count: 1,
+      worker_thread_steer_count: 0,
+      worker_thread_interrupt_count: 0,
+      source_turn_count_before: 1,
+      worker_session_closed: false
+    },
     ready: true,
     review_output: "first"
   });
@@ -117,6 +153,9 @@ test("continue reuses the same worker session and accept closes it", async () =>
   const completed = await service.controlTask(taskId, "accept");
   assert.equal(completed.state, "completed");
   assert.equal(completed.output, "second");
+  assert.equal(completed.threadAudit?.worker_thread_turn_start_count, 2);
+  assert.equal(completed.threadAudit?.source_turn_count_after, 1);
+  assert.equal(completed.threadAudit?.worker_session_closed, true);
   assert.equal(worker.closeCalls, 1);
 });
 
@@ -146,10 +185,27 @@ test("steer and interrupt reach the running worker, then interruption closes it"
   const worker: CodexThreadWorkerSession = {
     sourceThreadId: "source-1",
     workerThreadId: "worker-1",
+    workerSessionId: "worker-session-2",
     run: async () => new Promise<ExecutorResult>((resolve) => { resolveRun = resolve; }),
     steer: async (instruction) => { assert.equal(instruction, "focus"); },
     interrupt: async () => {},
-    close: async () => {}
+    close: async () => {},
+    getThreadAudit: () => ({
+      worker_session_id: "worker-session-2",
+      source_thread_id: "source-1",
+      worker_thread_id: "worker-1",
+      fork_rpc_count: 1,
+      source_thread_read_count: 2,
+      source_thread_resume_count: 0,
+      source_thread_turn_start_count: 0,
+      worker_thread_turn_start_count: 1,
+      worker_thread_steer_count: 1,
+      worker_thread_interrupt_count: 1,
+      source_turn_count_before: 1,
+      source_turn_count_after: 1,
+      source_terminal_snapshot_status: "available",
+      worker_session_closed: true
+    })
   };
   let factoryCalls = 0;
   const root = workspaceRoot();

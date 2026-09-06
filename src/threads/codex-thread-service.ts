@@ -3,7 +3,7 @@ import type { ChildProcessWithoutNullStreams, SpawnOptionsWithoutStdio } from "n
 
 import { CoreError, serializeError } from "../core/errors.js";
 import type { ErrorCode } from "../core/errors.js";
-import type { Id } from "../core/ids.js";
+import { newId, type Id } from "../core/ids.js";
 import { VERSION } from "../version.js";
 import { resolveCommand } from "../executors/command-resolution.js";
 import type { ProcessStarter } from "../executors/codex-executor.js";
@@ -28,6 +28,7 @@ const MAX_HISTORY_BYTES = 16_384;
 const MAX_OUTPUT_BYTES = 16_384;
 const MAX_EVIDENCE = 50;
 const MAX_EVIDENCE_BYTES = 65_536;
+const MAX_AUDIT_COUNT = 100;
 const MAX_JSONL_LINE_BYTES = 4 * 1024 * 1024;
 const MAX_PREVIEW_BYTES = 2_048;
 const TRUNCATION_MARKER = "[truncated]";
@@ -83,9 +84,30 @@ export interface CodexThreadReadResult {
   readonly source_kind?: CodexSourceKind | undefined;
   readonly status: string;
   readonly ephemeral: boolean;
+  readonly turn_count: number;
+  readonly updated_at?: number | undefined;
   readonly turns: readonly CodexThreadTurn[];
   readonly truncated: boolean;
   readonly truncation?: string | undefined;
+}
+
+export interface CodexThreadAudit {
+  readonly worker_session_id: string;
+  readonly source_thread_id: string;
+  readonly worker_thread_id: string;
+  readonly fork_rpc_count: number;
+  readonly source_thread_read_count: number;
+  readonly source_thread_resume_count: number;
+  readonly source_thread_turn_start_count: number;
+  readonly worker_thread_turn_start_count: number;
+  readonly worker_thread_steer_count: number;
+  readonly worker_thread_interrupt_count: number;
+  readonly source_turn_count_before: number;
+  readonly source_turn_count_after?: number | undefined;
+  readonly source_updated_at_before?: number | undefined;
+  readonly source_updated_at_after?: number | undefined;
+  readonly source_terminal_snapshot_status?: "available" | "unavailable" | undefined;
+  readonly worker_session_closed: boolean;
 }
 
 export interface CodexThreadReadRequest {
@@ -105,6 +127,7 @@ export interface CodexThreadTaskRequest {
 export interface CodexThreadWorkerSession {
   readonly sourceThreadId: string;
   readonly workerThreadId: string;
+  readonly workerSessionId: string;
   run(
     taskId: Id,
     instruction: string,
@@ -113,6 +136,7 @@ export interface CodexThreadWorkerSession {
   steer(instruction: string): Promise<void>;
   interrupt(): Promise<void>;
   close(): Promise<void>;
+  getThreadAudit(): CodexThreadAudit;
 }
 
 export type CodexThreadWorkerFactory = (
@@ -132,6 +156,23 @@ interface PendingCall {
   readonly reject: (error: CoreError) => void;
   readonly timer: NodeJS.Timeout;
 }
+
+interface ThreadSnapshot {
+  readonly turnCount: number;
+  readonly updatedAt?: number | undefined;
+}
+
+interface RpcAuditCounters {
+  fork_rpc_count: number;
+  source_thread_read_count: number;
+  source_thread_resume_count: number;
+  source_thread_turn_start_count: number;
+  worker_thread_turn_start_count: number;
+  worker_thread_steer_count: number;
+  worker_thread_interrupt_count: number;
+}
+
+type RpcAuditTarget = "source_thread" | "worker_thread" | "other";
 
 function isObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null;
@@ -173,6 +214,10 @@ function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function incrementAuditCounter(counters: RpcAuditCounters, key: keyof RpcAuditCounters): void {
+  counters[key] = Math.min(counters[key] + 1, MAX_AUDIT_COUNT);
+}
+
 function threadStatus(value: unknown): string {
   if (!isObject(value) || typeof value.type !== "string" || !THREAD_STATUS_KINDS.has(value.type)) {
     throw new CoreError("CODEX_PROTOCOL_ERROR");
@@ -210,6 +255,7 @@ function outputWithThread(
 }
 
 class CodexAppServerConnection {
+  readonly workerSessionId = newId();
   private child: ChildProcessWithoutNullStreams | undefined;
   private buffer = "";
   private nextId = 1;
@@ -217,6 +263,17 @@ class CodexAppServerConnection {
   private readonly pending = new Map<number, PendingCall>();
   private readonly notificationHandlers = new Set<NotificationHandler>();
   private readonly closedHandlers = new Set<ClosedHandler>();
+  private readonly rpcAudit: RpcAuditCounters = {
+    fork_rpc_count: 0,
+    source_thread_read_count: 0,
+    source_thread_resume_count: 0,
+    source_thread_turn_start_count: 0,
+    worker_thread_turn_start_count: 0,
+    worker_thread_steer_count: 0,
+    worker_thread_interrupt_count: 0
+  };
+  private sourceThreadId: string | undefined;
+  private workerThreadId: string | undefined;
   private readonly processExitHandler = (): void => this.terminateChild();
 
   constructor(
@@ -272,10 +329,23 @@ class CodexAppServerConnection {
     return () => this.closedHandlers.delete(handler);
   }
 
+  setSourceThreadId(threadId: string): void {
+    this.sourceThreadId = threadId;
+  }
+
+  setWorkerThreadId(threadId: string): void {
+    this.workerThreadId = threadId;
+  }
+
+  getRpcAudit(): Readonly<RpcAuditCounters> {
+    return { ...this.rpcAudit };
+  }
+
   call(method: string, params: unknown): Promise<unknown> {
     if (this.closed || this.child === undefined || this.child.stdin.destroyed) {
       return Promise.reject(new CoreError("CODEX_UNAVAILABLE"));
     }
+    this.recordRpc(method, params);
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -301,11 +371,30 @@ class CodexAppServerConnection {
     if (this.closed || this.child === undefined || this.child.stdin.destroyed) {
       throw new CoreError("CODEX_UNAVAILABLE");
     }
+    this.recordRpc(method, params);
     try {
       this.child.stdin.write(JSON.stringify({ method, params }) + "\n");
     } catch {
       throw new CoreError("CODEX_UNAVAILABLE");
     }
+  }
+
+  private recordRpc(method: string, params: unknown): void {
+    const target = this.rpcTarget(params);
+    if (method === "thread/fork" && target === "source_thread") incrementAuditCounter(this.rpcAudit, "fork_rpc_count");
+    else if (method === "thread/read" && target === "source_thread") incrementAuditCounter(this.rpcAudit, "source_thread_read_count");
+    else if (method === "thread/resume" && target === "source_thread") incrementAuditCounter(this.rpcAudit, "source_thread_resume_count");
+    else if (method === "turn/start" && target === "source_thread") incrementAuditCounter(this.rpcAudit, "source_thread_turn_start_count");
+    else if (method === "turn/start" && target === "worker_thread") incrementAuditCounter(this.rpcAudit, "worker_thread_turn_start_count");
+    else if (method === "turn/steer" && target === "worker_thread") incrementAuditCounter(this.rpcAudit, "worker_thread_steer_count");
+    else if (method === "turn/interrupt" && target === "worker_thread") incrementAuditCounter(this.rpcAudit, "worker_thread_interrupt_count");
+  }
+
+  private rpcTarget(params: unknown): RpcAuditTarget {
+    const threadId = isObject(params) && typeof params.threadId === "string" ? params.threadId : undefined;
+    if (threadId !== undefined && threadId === this.sourceThreadId) return "source_thread";
+    if (threadId !== undefined && threadId === this.workerThreadId) return "worker_thread";
+    return "other";
   }
 
   async close(): Promise<void> {
@@ -454,6 +543,7 @@ export class CodexThreadService {
     const root = this.registry.resolveCanonicalRoot(request.workspace_id);
     const maxTurns = this.maxTurns(request.max_turns);
     const connection = this.connection(root);
+    connection.setSourceThreadId(request.thread_id);
     await connection.open();
     try {
       const thread = await this.readSource(connection, root, request.thread_id, false);
@@ -468,18 +558,23 @@ export class CodexThreadService {
     const connection = this.connection(root);
     try {
       await connection.open();
-      await this.readSource(connection, root, request.source_thread_id, true);
+      connection.setSourceThreadId(request.source_thread_id);
+      const source = await this.readSource(connection, root, request.source_thread_id, true);
+      const sourceSnapshot = this.threadSnapshot(source);
       await this.validateModel(connection, request.model, request.reasoning_effort);
       const result = await connection.call("thread/fork", {
         threadId: request.source_thread_id,
         ephemeral: true
       });
       const workerThreadId = this.verifyFork(result, root, request.source_thread_id);
+      connection.setWorkerThreadId(workerThreadId);
       return new EphemeralCodexThreadWorkerSession(
         connection,
         root,
         request.source_thread_id,
         workerThreadId,
+        sourceSnapshot,
+        () => this.readSourceSnapshot(connection, root, request.source_thread_id),
         request.model,
         request.reasoning_effort,
         this.timing
@@ -520,6 +615,23 @@ export class CodexThreadService {
     return thread;
   }
 
+  private async readSourceSnapshot(
+    connection: CodexAppServerConnection,
+    root: string,
+    threadId: string
+  ): Promise<ThreadSnapshot> {
+    return this.threadSnapshot(await this.readSource(connection, root, threadId, false));
+  }
+
+  private threadSnapshot(thread: JsonObject): ThreadSnapshot {
+    if (!Array.isArray(thread.turns)) throw new CoreError("CODEX_PROTOCOL_ERROR");
+    const updatedAt = optionalNumber(thread.updatedAt);
+    return {
+      turnCount: thread.turns.length,
+      ...(updatedAt === undefined ? {} : { updatedAt })
+    };
+  }
+
   private projectSummary(value: unknown, root: string): CodexThreadSummary {
     if (!isObject(value) || typeof value.id !== "string" || value.id.length === 0) {
       throw new CoreError("CODEX_PROTOCOL_ERROR");
@@ -549,6 +661,7 @@ export class CodexThreadService {
     if (typeof thread.ephemeral !== "boolean") throw new CoreError("CODEX_PROTOCOL_ERROR");
     if (!Array.isArray(thread.turns)) throw new CoreError("CODEX_PROTOCOL_ERROR");
     const allTurns = thread.turns.map((value) => this.projectTurn(value));
+    const updatedAt = optionalNumber(thread.updatedAt);
     let turns = allTurns.slice(Math.max(0, allTurns.length - maxTurns));
     let truncated = allTurns.length > turns.length;
     const source = sourceKind(thread);
@@ -558,6 +671,8 @@ export class CodexThreadService {
       ...(source === undefined ? {} : { source_kind: source }),
       status,
       ephemeral: thread.ephemeral,
+      turn_count: allTurns.length,
+      ...(updatedAt === undefined ? {} : { updated_at: updatedAt }),
       turns,
       truncated,
       ...(truncated ? { truncation: TRUNCATION_MARKER } : {})
@@ -689,17 +804,26 @@ export class CodexThreadService {
 
 class EphemeralCodexThreadWorkerSession implements CodexThreadWorkerSession {
   private closed = false;
+  private closePromise: Promise<void> | undefined;
   private activeTurnId: string | undefined;
+  private sourceSnapshotAfter: ThreadSnapshot | undefined;
+  private sourceTerminalSnapshotStatus: "available" | "unavailable" | undefined;
 
   constructor(
     private readonly connection: CodexAppServerConnection,
     private readonly workspaceRoot: string,
     readonly sourceThreadId: string,
     readonly workerThreadId: string,
+    private readonly sourceSnapshotBefore: ThreadSnapshot,
+    private readonly readSourceSnapshot: () => Promise<ThreadSnapshot>,
     private readonly model: string | undefined,
     private readonly reasoningEffort: string | undefined,
     private readonly timing: CodexThreadServiceTiming
-  ) {}
+  ) {
+    this.workerSessionId = connection.workerSessionId;
+  }
+
+  readonly workerSessionId: string;
 
   async run(
     taskId: Id,
@@ -742,10 +866,39 @@ class EphemeralCodexThreadWorkerSession implements CodexThreadWorkerSession {
   }
 
   async close(): Promise<void> {
+    if (this.closePromise !== undefined) return this.closePromise;
+    this.closePromise = this.closeInternal();
+    return this.closePromise;
+  }
+
+  getThreadAudit(): CodexThreadAudit {
+    const counters = this.connection.getRpcAudit();
+    return {
+      worker_session_id: this.workerSessionId,
+      source_thread_id: this.sourceThreadId,
+      worker_thread_id: this.workerThreadId,
+      ...counters,
+      source_turn_count_before: this.sourceSnapshotBefore.turnCount,
+      ...(this.sourceSnapshotAfter === undefined ? {} : { source_turn_count_after: this.sourceSnapshotAfter.turnCount }),
+      ...(this.sourceSnapshotBefore.updatedAt === undefined ? {} : { source_updated_at_before: this.sourceSnapshotBefore.updatedAt }),
+      ...(this.sourceSnapshotAfter?.updatedAt === undefined ? {} : { source_updated_at_after: this.sourceSnapshotAfter.updatedAt }),
+      ...(this.sourceTerminalSnapshotStatus === undefined ? {} : { source_terminal_snapshot_status: this.sourceTerminalSnapshotStatus }),
+      worker_session_closed: this.closed
+    };
+  }
+
+  private async closeInternal(): Promise<void> {
     if (this.closed) return;
-    this.closed = true;
-    this.activeTurnId = undefined;
-    await this.connection.close();
+    try {
+      this.sourceSnapshotAfter = await this.readSourceSnapshot();
+      this.sourceTerminalSnapshotStatus = "available";
+    } catch {
+      this.sourceTerminalSnapshotStatus = "unavailable";
+    } finally {
+      this.closed = true;
+      this.activeTurnId = undefined;
+      await this.connection.close();
+    }
   }
 
   private runTurn(
