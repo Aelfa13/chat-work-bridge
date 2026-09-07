@@ -136,6 +136,12 @@ try {
         health_url = 'http://127.0.0.1:8981/healthz'
     }
     Assert-Test (-not (Test-ManagedRuntimeHealthy -TunnelClient 'unused' -Status $notReadyStatus -HealthProbe { return $true })) 'not-ready managed runtime is not treated as a no-op'
+    $healthAttempts = [ref]0
+    $waitedStatus = Wait-ManagedRuntimeHealthy -TunnelClient 'unused' -Status $healthyStatus -Attempts 2 -HealthProbe {
+        $healthAttempts.Value++
+        return $healthAttempts.Value -ge 2
+    }
+    Assert-Test ($waitedStatus.ready -and $healthAttempts.Value -eq 2) 'healthy runtime wait retries an initially incomplete control-plane poll'
 
     Add-CodexToProcessPath -CodexBin $freshDir | Out-Null
     $firstPathEntry = ($env:Path -split [regex]::Escape([IO.Path]::PathSeparator))[0]

@@ -466,6 +466,34 @@ function Test-ManagedRuntimeHealthy {
     return $LASTEXITCODE -eq 0
 }
 
+function Wait-ManagedRuntimeHealthy {
+    param(
+        [Parameter(Mandatory)][string]$TunnelClient,
+        [Parameter(Mandatory)]$Status,
+        [int]$Attempts = 30,
+        [AllowNull()][scriptblock]$HealthProbe
+    )
+
+    $currentStatus = $Status
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        if ($null -ne $currentStatus -and (Test-ManagedRuntimeHealthy `
+                -TunnelClient $TunnelClient `
+                -Status $currentStatus `
+                -HealthProbe $HealthProbe)) {
+            return $currentStatus
+        }
+
+        Start-Sleep -Seconds 1
+        if ($null -eq $HealthProbe) {
+            $currentStatus = Invoke-TunnelJson -Executable $TunnelClient -Arguments @(
+                'runtimes', 'status', $Alias, '--json'
+            )
+        }
+    }
+
+    throw "Managed runtime health/control-plane poll did not pass after $Attempts attempts."
+}
+
 function Write-LauncherSuccess {
     param(
         [Parameter(Mandatory)][string]$Alias,
@@ -564,10 +592,10 @@ function Invoke-Launcher {
         throw 'Managed runtime did not publish a health URL.'
     }
 
-    $null = & $tunnelClient 'health' '--url' $healthUrl '--require-control-plane-poll' '--json' 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Managed runtime health/ready/control-plane poll verification failed at $healthUrl."
-    }
+    $runtimeStatus = Wait-ManagedRuntimeHealthy `
+        -TunnelClient $tunnelClient `
+        -Status $runtimeStatus
+    $healthUrl = Get-ManagedRuntimeHealthUrl -Status $runtimeStatus
 
     $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')
     $machinePathAfter = [Environment]::GetEnvironmentVariable('Path', 'Machine')
