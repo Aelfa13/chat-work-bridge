@@ -10,6 +10,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$runAction = -not $LibraryOnly
 
 $script:TaskName = 'Engineering Bridge Secure MCP Tunnel'
 $script:ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -42,6 +43,7 @@ function New-TunnelRuntimeTaskSpec {
         TaskName          = $script:TaskName
         User              = $User
         Trigger           = 'AtLogOn'
+        LogonType         = 'Interactive'
         RunAsSystem       = $false
         Hidden            = $true
         MultipleInstances = 'IgnoreNew'
@@ -73,7 +75,7 @@ function Register-TunnelRuntimeTask {
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $spec.User
     $principal = New-ScheduledTaskPrincipal `
         -UserId $spec.User `
-        -LogonType InteractiveToken `
+        -LogonType Interactive `
         -RunLevel Limited
     $settings = New-ScheduledTaskSettingsSet `
         -Hidden `
@@ -159,6 +161,6 @@ function Invoke-TaskAction {
     }
 }
 
-if (-not $LibraryOnly) {
+if ($runAction) {
     Invoke-TaskAction
 }

@@ -35,6 +35,7 @@ $spec = New-TunnelRuntimeTaskSpec `
 Assert-Test ($spec.TaskName -eq 'Engineering Bridge Secure MCP Tunnel') 'task name is stable'
 Assert-Test ($spec.User -eq $user -and $spec.User -notin @('SYSTEM', 'NT AUTHORITY\SYSTEM')) 'task is registered for the current user, not SYSTEM'
 Assert-Test ($spec.Trigger -eq 'AtLogOn') 'task trigger is current-user logon'
+Assert-Test ($spec.LogonType -eq 'Interactive') 'task uses the Windows interactive logon type'
 Assert-Test ($spec.RunAsSystem -eq $false -and $spec.Hidden -eq $true) 'task is hidden and not a SYSTEM task'
 Assert-Test ($spec.MultipleInstances -eq 'IgnoreNew') 'duplicate task instances are ignored'
 Assert-Test ($spec.Execute -eq $powershell7) 'task uses the required PowerShell 7 executable'
