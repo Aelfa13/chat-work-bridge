@@ -89,7 +89,7 @@ pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass `
   -File .\scripts\windows\manage-tunnel-runtime-task.ps1 -Action register
 ```
 
-任务名为 `Engineering Bridge Secure MCP Tunnel`，触发器是当前用户登录，使用 PowerShell 7、当前用户的交互式受限令牌，不使用 SYSTEM；重复启动采用 `IgnoreNew`，短暂失败最多自动重试 3 次。任务参数只有 launcher 路径，不包含 key、`file:` 引用或 Tunnel ID。
+任务名为 `Engineering Bridge Secure MCP Tunnel`，触发器是当前用户登录，使用当前用户的交互式受限令牌，不使用 SYSTEM；重复启动采用 `IgnoreNew`，短暂失败最多自动重试 3 次。任务通过 Windows Script Host 的隐藏包装器启动 PowerShell 7，因此登录时不应出现控制台窗口。任务参数只包含包装器、PowerShell 7 和 launcher 路径，不包含 key、`file:` 引用或 Tunnel ID。
 
 查看、手动触发、停用和移除任务：
 
@@ -108,6 +108,42 @@ pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass `
 ```
 
 `disable` 和 `remove` 只影响本机任务，不删除 secret、Tunnel 或 ChatGPT app。实际注销/重启后的登录验证需单独记录；在未执行前只能标记为 `PENDING_USER_REBOOT`。
+
+## 新项目配置后的手动重启
+
+新增或修改 `var/workspaces.windows.local.json` 中的项目后，需要停止旧 managed runtime，重新启动它，才能让新配置被读取。`disable` 只会禁用登录触发器，不会停止当前 runtime；禁用后不能直接用 `run` 作为重启流程。应在 PowerShell 7 中执行：
+
+```powershell
+Set-Location "D:\HuaweiMoveData\Users\aelfa\Documents\codex project\chat-work-bridge"
+
+$Pwsh7 = "C:\Program Files (x86)\PowerShell\7\pwsh.exe"
+$TaskScript = ".\scripts\windows\manage-tunnel-runtime-task.ps1"
+
+# 停止旧 runtime，使新项目配置重新加载
+tunnel-client runtimes stop bridge-local
+
+# 重新注册并启用计划任务
+& $Pwsh7 -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File $TaskScript -Action register
+
+# 手动启动计划任务
+& $Pwsh7 -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File $TaskScript -Action run
+
+# 等待启动完成并检查结果
+Start-Sleep -Seconds 15
+& $Pwsh7 -NoLogo -NoProfile -ExecutionPolicy Bypass `
+  -File $TaskScript -Action status
+```
+
+预期状态为：
+
+```text
+TASK_STATE=Ready
+TASK_LAST_RESULT=0
+```
+
+`register` 会重新注册并启用同名任务；如果只是误执行了 `disable`、没有修改项目配置，可以省略 `runtimes stop`，直接执行 `register` 后再执行 `run`。启动成功后回到 ChatGPT Desktop 做 `list_codex_threads` smoke 验证。
 
 ## 状态与停止
 

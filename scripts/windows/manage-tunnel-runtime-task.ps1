@@ -15,6 +15,8 @@ $runAction = -not $LibraryOnly
 $script:TaskName = 'Engineering Bridge Secure MCP Tunnel'
 $script:ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $script:LauncherPath = (Resolve-Path (Join-Path $PSScriptRoot 'start-tunnel-runtime.ps1')).Path
+$script:HiddenLauncherPath = (Resolve-Path (Join-Path $PSScriptRoot 'start-tunnel-runtime-hidden.vbs')).Path
+$script:WindowsScriptHostPath = Join-Path ([Environment]::GetFolderPath('Windows')) 'System32\wscript.exe'
 $script:PowerShell7Path = 'C:\Program Files (x86)\PowerShell\7\pwsh.exe'
 
 $launcher = Join-Path $PSScriptRoot 'start-tunnel-runtime.ps1'
@@ -28,6 +30,8 @@ function New-TunnelRuntimeTaskSpec {
     param(
         [Parameter(Mandatory)][string]$Root,
         [Parameter(Mandatory)][string]$Launcher,
+        [Parameter(Mandatory)][string]$HiddenLauncher,
+        [Parameter(Mandatory)][string]$ScriptHostPath,
         [Parameter(Mandatory)][string]$PowerShellPath,
         [Parameter(Mandatory)][string]$User
     )
@@ -38,6 +42,12 @@ function New-TunnelRuntimeTaskSpec {
     if (-not (Test-Path -LiteralPath $Launcher -PathType Leaf)) {
         throw "Tunnel launcher is missing: $Launcher"
     }
+    if (-not (Test-Path -LiteralPath $HiddenLauncher -PathType Leaf)) {
+        throw "Hidden launcher is missing: $HiddenLauncher"
+    }
+    if (-not (Test-Path -LiteralPath $ScriptHostPath -PathType Leaf)) {
+        throw "Windows Script Host is missing: $ScriptHostPath"
+    }
 
     return [pscustomobject]@{
         TaskName          = $script:TaskName
@@ -47,8 +57,8 @@ function New-TunnelRuntimeTaskSpec {
         RunAsSystem       = $false
         Hidden            = $true
         MultipleInstances = 'IgnoreNew'
-        Execute           = $PowerShellPath
-        Arguments         = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Launcher
+        Execute           = $ScriptHostPath
+        Arguments         = '//B //NoLogo "{0}" "{1}" "{2}"' -f $HiddenLauncher, $PowerShellPath, $Launcher
         WorkingDirectory  = $Root
     }
 }
@@ -65,6 +75,8 @@ function Register-TunnelRuntimeTask {
     $spec = New-TunnelRuntimeTaskSpec `
         -Root $script:ProjectRoot `
         -Launcher $script:LauncherPath `
+        -HiddenLauncher $script:HiddenLauncherPath `
+        -ScriptHostPath $script:WindowsScriptHostPath `
         -PowerShellPath $script:PowerShell7Path `
         -User $user
 
