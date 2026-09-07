@@ -16,7 +16,6 @@ $ErrorActionPreference = 'Stop'
 
 $script:ProjectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $script:TunnelId = 'tunnel_6a9aefb73a748191ba6cc4dd9e2fae47'
-$script:HealthPort = 8080
 $script:CodexInstallRoot = if ($env:LOCALAPPDATA) {
     Join-Path $env:LOCALAPPDATA 'OpenAI\Codex\bin'
 }
@@ -390,6 +389,28 @@ function Wait-ManagedRuntimeReady {
     throw "Managed runtime '$Alias' did not reach process_running=true, healthy=true, ready=true."
 }
 
+function Get-ManagedRuntimeHealthUrl {
+    param([Parameter(Mandatory)]$Status)
+
+    $topLevel = $Status.PSObject.Properties['health_url']
+    if ($null -ne $topLevel -and -not [string]::IsNullOrWhiteSpace([string]$topLevel.Value)) {
+        return [string]$topLevel.Value
+    }
+
+    $local = $Status.PSObject.Properties['local']
+    if ($null -ne $local) {
+        $health = $local.Value.PSObject.Properties['health']
+        if ($null -ne $health) {
+            $url = $health.Value.PSObject.Properties['url']
+            if ($null -ne $url -and -not [string]::IsNullOrWhiteSpace([string]$url.Value)) {
+                return [string]$url.Value
+            }
+        }
+    }
+
+    return $null
+}
+
 function Invoke-Launcher {
     $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     $machinePathBefore = [Environment]::GetEnvironmentVariable('Path', 'Machine')
@@ -445,10 +466,15 @@ function Invoke-Launcher {
         throw "tunnel-client runtimes connect failed for alias '$Alias': $reason"
     }
 
-    $null = Wait-ManagedRuntimeReady -TunnelClient $tunnelClient -Alias $Alias
-    $null = & $tunnelClient 'health' '--port' $script:HealthPort '--require-control-plane-poll' '--json' 2>$null
+    $runtimeStatus = Wait-ManagedRuntimeReady -TunnelClient $tunnelClient -Alias $Alias
+    $healthUrl = Get-ManagedRuntimeHealthUrl -Status $runtimeStatus
+    if ([string]::IsNullOrWhiteSpace($healthUrl)) {
+        throw 'Managed runtime did not publish a health URL.'
+    }
+
+    $null = & $tunnelClient 'health' '--url' $healthUrl '--require-control-plane-poll' '--json' 2>$null
     if ($LASTEXITCODE -ne 0) {
-        throw 'Managed runtime health/ready/control-plane poll verification failed.'
+        throw "Managed runtime health/ready/control-plane poll verification failed at $healthUrl."
     }
 
     $userPathAfter = [Environment]::GetEnvironmentVariable('Path', 'User')

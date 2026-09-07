@@ -102,6 +102,9 @@ try {
     Assert-Test ($mcpCommand -like '"C:/Program Files/nodejs/node.exe" *') 'MCP command uses a quoted absolute Node path with parser-safe separators'
     Assert-Test ($mcpCommand -like '*"D:/HuaweiMoveData/Users/aelfa/Documents/codex project/chat-work-bridge/dist/src/mcp-stdio.js"*') 'MCP command preserves the Bridge entrypoint and spaces'
 
+    $runtimeStatus = [pscustomobject]@{ health_url = 'http://127.0.0.1:8981/healthz' }
+    Assert-Test ((Get-ManagedRuntimeHealthUrl -Status $runtimeStatus) -eq $runtimeStatus.health_url) 'managed runtime validation uses the published dynamic health URL'
+
     Add-CodexToProcessPath -CodexBin $freshDir | Out-Null
     $firstPathEntry = ($env:Path -split [regex]::Escape([IO.Path]::PathSeparator))[0]
     Assert-Test ($firstPathEntry -ieq (Get-Item -LiteralPath $freshDir).FullName) 'Codex directory is prepended to process-local PATH'
