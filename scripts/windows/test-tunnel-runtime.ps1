@@ -40,6 +40,7 @@ function Assert-Throws {
 
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('chat-work-bridge-launcher-' + [guid]::NewGuid().ToString('N'))
 $oldPath = $env:Path
+$oldLocalAppData = $env:LOCALAPPDATA
 $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
 $machinePathBefore = [Environment]::GetEnvironmentVariable('Path', 'Machine')
 
@@ -86,7 +87,20 @@ try {
         Resolve-CodexExecutable -CodexRoot $invalidRoot -PathCommand $null -VersionProbe $probe | Out-Null
     } 'invalid Codex version output fails closed'
 
-    Assert-Throws { Assert-RuntimeKey -Value '' } 'missing runtime key fails closed'
+    $env:LOCALAPPDATA = Join-Path $fixture 'localappdata'
+    $secretPath = Get-RuntimeSecretPath
+    Assert-Throws {
+        Assert-RuntimeSecretFile -Path $secretPath | Out-Null
+    } 'missing runtime secret file fails closed'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $secretPath) -Force | Out-Null
+    [IO.File]::WriteAllText($secretPath, 'test-only-runtime-key', [Text.UTF8Encoding]::new($false))
+    $secretReference = Get-RuntimeSecretReference
+    Assert-Test ($secretReference -eq "file:$secretPath") 'runtime secret uses an absolute file reference'
+    Assert-Test ($secretReference -notlike '*test-only-runtime-key*') 'runtime secret value is never included in the reference'
+    [IO.File]::WriteAllText($secretPath, "test-only-runtime-key`r`n", [Text.UTF8Encoding]::new($false))
+    Assert-Throws {
+        Assert-RuntimeSecretFile -Path $secretPath | Out-Null
+    } 'runtime secret newline fails closed'
 
     $missingDistRoot = Join-Path $fixture 'missing-dist'
     New-Item -ItemType Directory -Path (Join-Path $missingDistRoot 'var') -Force | Out-Null
@@ -105,6 +119,24 @@ try {
     $runtimeStatus = [pscustomobject]@{ health_url = 'http://127.0.0.1:8981/healthz' }
     Assert-Test ((Get-ManagedRuntimeHealthUrl -Status $runtimeStatus) -eq $runtimeStatus.health_url) 'managed runtime validation uses the published dynamic health URL'
 
+    $healthyStatus = [pscustomobject]@{
+        process_running = $true
+        healthy = $true
+        ready = $true
+        health_url = 'http://127.0.0.1:8981/healthz'
+    }
+    Assert-Test (Test-ManagedRuntimeHealthy -TunnelClient 'unused' -Status $healthyStatus -HealthProbe {
+        param($url)
+        return $url -eq 'http://127.0.0.1:8981/healthz'
+    }) 'healthy managed runtime is eligible for the no-op path'
+    $notReadyStatus = [pscustomobject]@{
+        process_running = $true
+        healthy = $true
+        ready = $false
+        health_url = 'http://127.0.0.1:8981/healthz'
+    }
+    Assert-Test (-not (Test-ManagedRuntimeHealthy -TunnelClient 'unused' -Status $notReadyStatus -HealthProbe { return $true })) 'not-ready managed runtime is not treated as a no-op'
+
     Add-CodexToProcessPath -CodexBin $freshDir | Out-Null
     $firstPathEntry = ($env:Path -split [regex]::Escape([IO.Path]::PathSeparator))[0]
     Assert-Test ($firstPathEntry -ieq (Get-Item -LiteralPath $freshDir).FullName) 'Codex directory is prepended to process-local PATH'
@@ -114,6 +146,7 @@ try {
     Write-Output "TARGETED_TESTS=PASS ($script:Passed assertions)"
 } finally {
     $env:Path = $oldPath
+    $env:LOCALAPPDATA = $oldLocalAppData
     if (Test-Path -LiteralPath $fixture) {
         Remove-Item -LiteralPath $fixture -Recurse -Force
     }

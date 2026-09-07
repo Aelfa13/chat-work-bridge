@@ -210,12 +210,40 @@ function Add-CodexToProcessPath {
     return $env:Path
 }
 
-function Assert-RuntimeKey {
-    param([AllowEmptyString()][AllowNull()][string]$Value)
+function Get-RuntimeSecretPath {
+    param([AllowNull()][string]$LocalAppData = $env:LOCALAPPDATA)
 
-    if ([string]::IsNullOrWhiteSpace($Value)) {
-        throw 'CONTROL_PLANE_API_KEY is missing. Set it in this PowerShell session; the launcher never accepts a literal key.'
+    if ([string]::IsNullOrWhiteSpace($LocalAppData)) {
+        throw 'LOCALAPPDATA is unavailable; cannot locate the runtime secret file.'
     }
+
+    return Join-Path $LocalAppData 'EngineeringBridge\secrets\control-plane-api-key'
+}
+
+function Assert-RuntimeSecretFile {
+    param([Parameter(Mandatory)][string]$Path)
+
+    $fullPath = Get-FullFilePath -Path $Path
+    if ($null -eq $fullPath) {
+        throw "RUNTIME_SECRET_UNAVAILABLE: runtime secret file is missing or is not a regular file: $Path"
+    }
+
+    try {
+        $content = [IO.File]::ReadAllText($fullPath)
+    } catch {
+        throw "RUNTIME_SECRET_UNAVAILABLE: runtime secret file cannot be read: $fullPath"
+    }
+
+    if ([string]::IsNullOrWhiteSpace($content) -or $content -match '[\r\n]') {
+        throw "RUNTIME_SECRET_UNAVAILABLE: runtime secret file must contain one non-empty line without a newline: $fullPath"
+    }
+
+    return $fullPath
+}
+
+function Get-RuntimeSecretReference {
+    $path = Assert-RuntimeSecretFile -Path (Get-RuntimeSecretPath)
+    return "file:$path"
 }
 
 function Assert-BridgePreflight {
@@ -411,9 +439,74 @@ function Get-ManagedRuntimeHealthUrl {
     return $null
 }
 
+function Test-ManagedRuntimeHealthy {
+    param(
+        [Parameter(Mandatory)][string]$TunnelClient,
+        [Parameter(Mandatory)]$Status,
+        [AllowNull()][scriptblock]$HealthProbe
+    )
+
+    $processRunning = Get-RequiredBoolean -Object $Status -Name 'process_running'
+    $healthy = Get-RequiredBoolean -Object $Status -Name 'healthy'
+    $ready = Get-RequiredBoolean -Object $Status -Name 'ready'
+    if ($processRunning -ne $true -or $healthy -ne $true -or $ready -ne $true) {
+        return $false
+    }
+
+    $healthUrl = Get-ManagedRuntimeHealthUrl -Status $Status
+    if ([string]::IsNullOrWhiteSpace($healthUrl)) {
+        return $false
+    }
+
+    if ($null -ne $HealthProbe) {
+        return [bool](& $HealthProbe $healthUrl)
+    }
+
+    $null = & $TunnelClient 'health' '--url' $healthUrl '--require-control-plane-poll' '--json' 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
+function Write-LauncherSuccess {
+    param(
+        [Parameter(Mandatory)][string]$Alias,
+        [Parameter(Mandatory)][string]$CodexResolution,
+        [Parameter(Mandatory)][string]$RuntimeSecretReference,
+        [Parameter(Mandatory)][bool]$AlreadyRunning
+    )
+
+    Write-Output 'UNATTENDED_STARTUP_STATUS=PASS'
+    Write-Output 'TUNNEL_LAUNCHER_STATUS=PASS'
+    Write-Output "ALREADY_RUNNING=$(if ($AlreadyRunning) { 'YES' } else { 'NO' })"
+    Write-Output "CODEX_DYNAMIC_RESOLUTION=$CodexResolution"
+    Write-Output 'CODEX_HASH_HARDCODED=NO'
+    Write-Output 'CODEX_PATH_PROCESS_LOCAL=YES'
+    Write-Output 'PERMANENT_PATH_MODIFIED=NO'
+    Write-Output "MANAGED_RUNTIME_ALIAS=$Alias"
+    Write-Output 'MANAGED_RUNTIME_USED=YES'
+    Write-Output 'TUNNEL_REUSED=YES'
+    Write-Output "RUNTIME_SECRET_REFERENCE=$RuntimeSecretReference"
+    Write-Output 'TUNNEL_HEALTH=PASS'
+    Write-Output 'TUNNEL_READY=PASS'
+    Write-Output 'CONTROL_PLANE=PASS'
+    Write-Output 'STOPWATCH_LIST_SMOKE=RUN_SEPARATELY'
+}
+
 function Invoke-Launcher {
     $userPathBefore = [Environment]::GetEnvironmentVariable('Path', 'User')
     $machinePathBefore = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $tunnelClient = Resolve-TunnelClient
+    $existingStatus = Invoke-TunnelJson -Executable $tunnelClient -Arguments @(
+        'runtimes', 'status', $Alias, '--json'
+    )
+    if ($null -ne $existingStatus -and (Test-ManagedRuntimeHealthy -TunnelClient $tunnelClient -Status $existingStatus)) {
+        Write-LauncherSuccess `
+            -Alias $Alias `
+            -CodexResolution 'SKIPPED_ALREADY_RUNNING' `
+            -RuntimeSecretReference 'not_required_for_noop' `
+            -AlreadyRunning $true
+        return
+    }
+
     $preflight = Assert-BridgePreflight -Root $script:ProjectRoot
     $codex = Resolve-CodexExecutable
 
@@ -434,8 +527,7 @@ function Invoke-Launcher {
         throw 'codex login status failed; authenticate Codex before starting the Tunnel.'
     }
 
-    Assert-RuntimeKey -Value $env:CONTROL_PLANE_API_KEY
-    $tunnelClient = Resolve-TunnelClient
+    $runtimeSecretReference = Get-RuntimeSecretReference
     $profileDir = Get-ExistingTunnelProfileDir
     $mcpCommand = New-TunnelMcpCommand `
         -NodePath $preflight.NodePath `
@@ -448,7 +540,7 @@ function Invoke-Launcher {
         '--profile-dir', $profileDir,
         '--profile', $Profile,
         '--tunnel-id', $script:TunnelId,
-        '--runtime-api-key', 'env:CONTROL_PLANE_API_KEY',
+        '--runtime-api-key', $runtimeSecretReference,
         '--mcp-command', $mcpCommand,
         '--json'
     )
@@ -483,20 +575,13 @@ function Invoke-Launcher {
         throw 'Permanent User or Machine PATH changed unexpectedly.'
     }
 
-    Write-Output 'TUNNEL_LAUNCHER_STATUS=PASS'
-    Write-Output "CODEX_DYNAMIC_RESOLUTION=PASS ($($codex.Resolution))"
-    Write-Output 'CODEX_HASH_HARDCODED=NO'
-    Write-Output 'CODEX_PATH_PROCESS_LOCAL=YES'
-    Write-Output 'PERMANENT_PATH_MODIFIED=NO'
+    Write-LauncherSuccess `
+        -Alias $Alias `
+        -CodexResolution "PASS ($($codex.Resolution))" `
+        -RuntimeSecretReference $runtimeSecretReference `
+        -AlreadyRunning $false
     Write-Output "CODEX_EXE=$($codex.Path)"
     Write-Output "CODEX_VERSION=$($sessionVersion.Text)"
-    Write-Output "MANAGED_RUNTIME_ALIAS=$Alias"
-    Write-Output 'MANAGED_RUNTIME_USED=YES'
-    Write-Output 'TUNNEL_REUSED=YES'
-    Write-Output 'TUNNEL_HEALTH=PASS'
-    Write-Output 'TUNNEL_READY=PASS'
-    Write-Output 'CONTROL_PLANE=PASS'
-    Write-Output 'STOPWATCH_LIST_SMOKE=RUN_SEPARATELY'
 }
 
 if (-not $LibraryOnly) {
