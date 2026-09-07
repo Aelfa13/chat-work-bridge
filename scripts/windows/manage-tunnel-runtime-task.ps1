@@ -48,7 +48,7 @@ function New-TunnelRuntimeTaskSpec {
         Hidden            = $true
         MultipleInstances = 'IgnoreNew'
         Execute           = $PowerShellPath
-        Arguments         = '-NoLogo -NoProfile -ExecutionPolicy Bypass -File "{0}"' -f $Launcher
+        Arguments         = '-NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "{0}"' -f $Launcher
         WorkingDirectory  = $Root
     }
 }

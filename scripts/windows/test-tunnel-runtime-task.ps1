@@ -39,6 +39,7 @@ Assert-Test ($spec.LogonType -eq 'Interactive') 'task uses the Windows interacti
 Assert-Test ($spec.RunAsSystem -eq $false -and $spec.Hidden -eq $true) 'task is hidden and not a SYSTEM task'
 Assert-Test ($spec.MultipleInstances -eq 'IgnoreNew') 'duplicate task instances are ignored'
 Assert-Test ($spec.Execute -eq $powershell7) 'task uses the required PowerShell 7 executable'
+Assert-Test ($spec.Arguments -like '*-WindowStyle Hidden*') 'PowerShell console window is hidden'
 Assert-Test ($spec.Arguments -like '*-File "*start-tunnel-runtime.ps1"*') 'launcher path is quoted for spaces'
 Assert-Test ($spec.Arguments -notmatch 'CONTROL_PLANE_API_KEY|file:|api[_-]?key|tunnel_[0-9a-f]+') 'task arguments contain no secret or runtime reference'
 
